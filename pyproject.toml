@@ -1,0 +1,29 @@
+[project]
+name = "adaptnn"
+version = "0.1"
+description = "Adaptive linear/convolutional layers for modeling."
+authors = [
+    {"name" = "Kenneth Latimer", "email" = "latimerkw@gmail.com"}
+]
+license = {"file" = "LICENSE"}
+readme = "README.md"
+requires-python = ">3.9"
+
+
+# Requirements
+dependencies = [
+    "numpy",
+    "torch"
+]
+
+[build-system]
+requires = [
+    "setuptools"
+]
+build-backend = "setuptools.build_meta"
+
+
+[project.urls]
+homepage = "https://github.com/latimerk/adaptnn/"
+repository = "https://github.com/latimerk/adaptnn/"
+documentation = "https://github.com/latimerk/hddCRP/"
