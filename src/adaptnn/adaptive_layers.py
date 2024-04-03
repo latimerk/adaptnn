@@ -5,7 +5,7 @@ class SimpleMLP(torch.nn.Sequential):
     def __init__(self, in_features : int, out_features : int,
                  hidden_features : List[int] | int,
                  hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.ReLU,
-                 out_activation    : Optional[Callable[..., torch.nn.Module]] = torch.nn.Sigmoid,
+                 out_activation    : Optional[Callable[..., torch.nn.Module]] = None,
                  bias : bool = True, out_bias : bool = True):
         if(isinstance(hidden_features, int)):
             hidden_features = [hidden_features];
@@ -25,45 +25,77 @@ class SimpleMLP(torch.nn.Sequential):
 
 class AdaptiveLinear(torch.nn.Module):
     def __init__(self, in_features : int, out_features : int, 
-                 adapt_in_features : int, adapt_hidden_features : int | List[int],
-                 adapt_hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.ReLU, 
-                 adapt_out_activation    : Optional[Callable[..., torch.nn.Module]] = torch.nn.Sigmoid,
-                 bias : bool= True, adapt_hidden_bias : bool = True, adapt_out_bias : bool = True, center_B_0 : bool = False):
+                 adapt_in_features : int,
+                 n_modes : int = 2,
+                 bias : bool= True, adapt_bias : bool = True, center_B_0 : bool = True):
         super().__init__()
+
+        if(n_modes < 2):
+            raise ValueError(f"n_modes must be int >= 2. Received {n_modes}.")
         
-        self.B_0 = torch.nn.Linear(in_features=in_features, out_features=out_features, bias=bias)
-        self.B_1 = torch.nn.Linear(in_features=in_features, out_features=out_features, bias=bias)
-        self.W   = SimpleMLP(adapt_in_features, out_features=1, hidden_features=adapt_hidden_features,
-                             hidden_activation=adapt_hidden_activation,
-                             out_activation=adapt_out_activation,
-                             bias = adapt_hidden_bias, out_bias=adapt_out_bias)
+        self.n_modes = n_modes
+        self.out_features = out_features
+        self.in_features = in_features
+        self.adapt_in_features = adapt_in_features
+        
+        self.B = torch.nn.Linear(in_features=in_features, out_features=out_features*n_modes, bias=bias)
+
+        if(self.n_modes == 2):
+            self.center_B_0_ = center_B_0
+        else:
+            self.center_B_0_ = False
+
+        if(adapt_in_features is not None):
+            if(self.n_modes == 2):
+                if(self.center_B_0_):
+                    self.W = torch.nn.Sequential([torch.nn.Linear(in_features=adapt_in_features, out_features=1, bias=bias),
+                                                torch.nn.Tanh()])
+                else:
+                    self.W = torch.nn.Sequential([torch.nn.Linear(in_features=adapt_in_features, out_features=1, bias=bias),
+                                                torch.nn.Sigmoid()])
+            
+            else:
+                self.W = torch.nn.Sequential([torch.nn.Linear(in_features=adapt_in_features, out_features=n_modes, bias=bias),
+                                        torch.nn.Softmax(dim=1)])
+
+
         self.center_B_0_ = center_B_0;
 
 
-    def forward(self, x, adapt_x):
-        w_ = self.W(adapt_x)
-        if(self.center_B_0_):
-            return self.B_0(x) + self.B_1(x)*w_
+    def forward(self, x : torch.Tensor, adapt_x : torch.Tensor):
+        if(self.adapt_in_features is None):
+            w_ = adapt_x
         else:
-            return self.B_0(x)*(1-w_) + self.B_1(x)*w_
+            w_ = self.W(adapt_x)
+        b_ = self.B(x).view(x.shape[0], self.out_features, self.n_modes)
+
+        if(self.n_modes == 2):
+            if(self.center_B_0_ ):
+                return b_[:,:,0] + b_[:,:,1]*w_
+            else:
+                return b_[:,:,0]*(1-w_) + b_[:,:,1]*w_
+            
+        else:
+            return torch.matmul(b_, w_.view(x.shape[0], self.n_modes, 1)).squeeze(dim=2)
         
     def compute_adapt(self, adapt_x):
         with torch.no_grad():
             return self.W(adapt_x)
         
-class FixedAdaptiveLinear(torch.nn.Module):
-    def __init__(self, in_features : int, out_features : int, 
-                 bias : bool= True,  center_B_0 : bool = False):
+
+class QuickReducer(torch.nn.module):
+    def __init__(self, M : torch.Tensor, normalize : bool = True):
         super().__init__()
-        
-        self.B_0 = torch.nn.Linear(in_features=in_features, out_features=out_features, bias=bias)
-        self.B_1 = torch.nn.Linear(in_features=in_features, out_features=out_features, bias=bias)
-        self.center_B_0_ = center_B_0;
-
-
-    def forward(self, x, w):
-        if(self.center_B_0_):
-            return self.B_0(x) + self.B_1(x)*w
+        if(normalize):
+            self.M      = M / torch.norm(M,dim=0,keepdim=True)
+            self.s_bias = -torch.exp(0.5)
+            self.s_norm = torch.e*(1-torch.e)
         else:
-            return self.B_0(x)*(1-w) + self.B_1(x)*w
-        
+            self.M = M
+            self.s_bias = 0
+            self.s_norm = 1
+
+    def forward(self, x):
+
+        y = torch.matmul(x,self.M)
+        return torch.hstack([y, (torch.square(y)-self.s_bias)/self.s_norm ])

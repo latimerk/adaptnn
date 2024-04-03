@@ -1,13 +1,13 @@
 [project]
 name = "adaptnn"
 version = "0.1"
-description = "Adaptive linear/convolutional layers for modeling."
+description = "Adaptive linear/convolutional layers for modeling neuron responses."
 authors = [
     {"name" = "Kenneth Latimer", "email" = "latimerkw@gmail.com"}
 ]
 license = {"file" = "LICENSE"}
 readme = "README.md"
-requires-python = ">3.9"
+requires-python = ">3.10"
 
 
 # Requirements
@@ -26,4 +26,4 @@ build-backend = "setuptools.build_meta"
 [project.urls]
 homepage = "https://github.com/latimerk/adaptnn/"
 repository = "https://github.com/latimerk/adaptnn/"
-documentation = "https://github.com/latimerk/hddCRP/"
+documentation = "https://github.com/latimerk/adaptnn/"
