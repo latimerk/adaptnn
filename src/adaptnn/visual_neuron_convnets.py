@@ -2,8 +2,10 @@ import torch
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import numpy.typing as npt
-from itertools import cycle
-# import tltorch
+
+import tensorly as tl
+import tltorch
+from tltorch.functional import convolve as tltorch_convolve
 
 def compute_conv_output_size(L_in : int, kernel_size : int, stride : int = 1,
                              dilation : int=1, padding : int = 0) -> int:
@@ -24,36 +26,61 @@ def tuple_convert(a, l = 1, target = None):
         except:
             pass
         return (a,) * l
-        
 
             
 
-class SpatioTemporalRFConv3D(torch.nn.Module):
-    def __init__(self, in_channels : int, out_channels : int, kernel_size : tuple, rank : int, bias : bool = True, stride=1, padding=0, dilation=1, groups = 1):
+class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
+    def __init__(self, in_channels : int, out_channels : int,
+                 kernel_size : tuple, rank : int,
+                 bias : bool = True,
+                 factorization_type = 'spatial',
+                 stride=1, padding=0, dilation=1, groups = 1,
+                 device=None, dtype=None):
         
         super().__init__()
 
         kernel_size = tuple_convert(kernel_size)
         assert len(kernel_size) == 3, "kernel size must be length 3"
-        assert rank > 0 and rank < (kernel_size[0] * kernel_size[1] * (in_channels/groups)) and rank < kernel_size[2], "rank is not within valid limits"
 
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
         self.rank = rank
 
-        self.space_channels  = int(in_channels/groups) * kernel_size[0] * kernel_size[1]
+        self.space_channels  =  kernel_size[0] * kernel_size[1]
+        self.in_group_channels = int(in_channels/groups);
 
-        self.weights_shape_ = (out_channels, int(in_channels/groups)) +  kernel_size
+        self.weights_shape_ = (out_channels, self.in_group_channels) +  kernel_size
+
+        self.factorization_type = factorization_type
+        if(self.factorization_type == 'spatial'):
+            self.factorization_shape_ = (out_channels, self.in_group_channels, kernel_size[0]*kernel_size[1], kernel_size[2])
+            if(isinstance(rank,int)):
+                rank = (rank,) * 4
+
+            assert len(rank) == len(self.factorization_shape_), "rank must be shape (out_channels, in_channels, space, time)"
+        elif(self.factorization_type == 'spatialchannel'):
+            self.factorization_shape_ = (out_channels, self.in_group_channels * kernel_size[0]*kernel_size[1], kernel_size[2])
+
+            if(isinstance(rank,int)):
+                rank = (rank,) * 3
+
+            assert len(rank) == len(self.factorization_shape_), "rank must be shape (out_channels, in_channels&space, time)"
+        else:
+            raise ValueError(f"Invalid factorization_type: {factorization_type}")
+        
 
         # self.weights_space_ = torch.zeros(out_channels, in_channels/groups, kernel_size[0], kernel_size[1], rank)
-        self.weights_space_ = torch.nn.parameter.Parameter(torch.zeros((out_channels, self.space_channels, rank)))
-        self.weights_time_  = torch.nn.parameter.Parameter(torch.zeros((out_channels, rank, kernel_size[2])))
+        self.weight = tltorch.FactorizedTensor.new(self.factorization_shape_,
+                                                   rank=rank, factorization="Tucker",
+                                                   device=device, dtype=dtype)
         if(bias):
-            self.bias = torch.nn.parameter.Parameter(torch.zeros((out_channels)))
+            self.bias = torch.nn.parameter.Parameter(torch.zeros((out_channels), device=device, dtype=dtype))
         else:
             self.bias = None
-        self.init_weights()
+            self.register_parameter('bias', None)
+
+        self.reset_parameters()
 
         self.stride = stride
         self.dilation = dilation
@@ -62,36 +89,76 @@ class SpatioTemporalRFConv3D(torch.nn.Module):
 
 
     @torch.no_grad()
-    def init_weights(self):
+    def reset_parameters(self, std = None, std_bias = 1, generator=None):
         if(self.bias is not None):
-            self.bias[:] = torch.randn(self.out_channels)
+            torch.nn.init.normal_(self.bias, mean=0.0, std=std_bias, generator=generator)
 
-        weights_full = torch.randn(self.out_channels, self.space_channels, self.kernel_size[2]) / np.sqrt(self.space_channels)
-        self.refactorize_weights(weights_full)
+        tltorch.factorized_tensors.init.tucker_init(self.weight, std=std)
 
-    @torch.no_grad()
-    def refactorize_weights(self, W = None):
-        if(W is None):
-            W = torch.matmul(self.weights_space_, self.weights_time_ )
-        U,S,Vh = torch.linalg.svd(W)
-        
-        U = U[:,:,:self.rank]
-        Vh = Vh[:,:self.rank,:]
-        S = torch.unsqueeze(S[:,:self.rank], -1)
-        self.weights_space_[:,:,:] = U
-        self.weights_time_[:,:,:]  = Vh * S
-
-    def weight(self):
-        W = torch.matmul(self.weights_space_, self.weights_time_ )
-        W = W.view(self.weights_shape_)
-        return W
 
     
     def forward(self, X):
-        W = self.weight()
 
-        return torch.nn.functional.conv3d(X, W, bias=self.bias, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+        return self.tucker_conv(X, self.weight(), self.factorization_type, self.weights_shape_,
+                                bias=self.bias,
+                                stride=self.stride, padding=self.padding,
+                                dilation=self.dilation, groups=self.groups)
 
+        #return torch.nn.functional.conv3d(X, W, bias=self.bias, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+
+    
+    def tucker_conv(x, tucker_tensor, factorization_type, weight_shape_0 : tuple, bias=None, stride=1, padding=0, dilation=1):
+        '''
+        Specialized version altered from the tensory torch library for my space-time separable kernels
+        '''
+        # Extract the rank from the actual decomposition in case it was changed by, e.g. dropout
+        weight_shape = list(weight_shape_0)
+        
+        rank =tucker_tensor.rank
+
+        batch_size = x.shape[0]
+        n_dim = tl.ndim(x)
+
+        # Change the number of channels to the rank
+        x_shape = list(x.shape)
+
+        # only do if not combining space & in channel factors
+        if(factorization_type == 'spatial'):
+            x = x.reshape((batch_size, x_shape[1], -1)).contiguous()
+
+            # This can be done with a tensor contraction
+            # First conv == tensor contraction
+            # from (in_channels, rank) to (rank == out_channels, in_channels, 1)
+            x = torch.nn.conv1d(x, tl.transpose(tucker_tensor.factors[1]).unsqueeze(2))
+
+            x_shape[1] = rank[1]
+            x = x.reshape(x_shape)
+
+            start_factors_mult = 2
+            weight_shape[1] = rank[1]
+        else:
+            start_factors_mult = 1
+
+        modes = list(range(start_factors_mult, n_dim+1))
+        weight = tl.tenalg.multi_mode_dot(tucker_tensor.core, tucker_tensor.factors[start_factors_mult:], modes=modes)
+        
+        #reshape weight to the correct x-y space
+        weight.reshape(weight_shape)
+
+
+        x = tltorch_convolve(x, weight, bias=None, stride=stride, padding=padding, dilation=dilation)
+
+        # Revert back number of channels from rank to output_channels
+        x_shape = list(x.shape)
+        x = x.reshape((batch_size, x_shape[1], -1))
+        # Last conv == tensor contraction
+        # From (out_channels, rank) to (out_channels, in_channels == rank, 1)
+        x = torch.nn.conv1d(x, tucker_tensor.factors[0].unsqueeze(2), bias=bias)
+
+        x_shape[1] = x.shape[1]
+        x = x.reshape(x_shape)
+
+        return x
 # 
 class TransposeLinear(torch.nn.Module):
     '''
@@ -144,9 +211,12 @@ class PopulationFullFieldNet(torch.nn.Sequential):
     def __init__(self, num_cells : int,
                        layer_channels : int | Tuple[int] = [8,8],
                        layer_time_lengths : int | Tuple[int] = [100,40],
+                       layer_groups : int | Tuple[int] = 1,
+                       layer_nonlinearity : bool | Tuple[bool] = True,
                        hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
                        out_activation    : Optional[Callable[..., torch.nn.Module]] = None, #torch.nn.Softplus,
-                       bias : bool = True):
+                       bias : bool = True,
+                       device=None, dtype=None):
         
 
         layer_channels = tuple_convert(layer_channels)
@@ -154,26 +224,35 @@ class PopulationFullFieldNet(torch.nn.Sequential):
 
         in_channels = 1
         layer_time_lengths = tuple_convert(layer_time_lengths, n_layers)
+        layer_groups = tuple_convert(layer_groups, n_layers)
+        layer_nonlinearity = tuple_convert(layer_nonlinearity, n_layers)
         
         assert len(layer_channels) == len(layer_time_lengths), "must give same number of layer_time_lengths and layer_channels"
+        assert len(layer_channels) == len(layer_groups), "must give same number of layer_groups and layer_channels"
+        assert len(layer_channels) == len(layer_nonlinearity), "must give same number of layer_nonlinearity and layer_channels"
 
         layers = []
         in_channels = 1
-        for ker_size, out_channels in zip(layer_time_lengths, layer_channels):
+        for ker_size, out_channels, groups_c, nonlinearity_c in zip(layer_time_lengths,
+                                                    layer_channels,
+                                                    layer_groups,
+                                                    layer_nonlinearity):
 
             layers.append(torch.nn.Conv1d(in_channels=in_channels,
-                                          out_channels=out_channels,
+                                          out_channels=out_channels, groups=groups_c,
                                           kernel_size=ker_size,
-                                          stride=1, bias=bias, padding="valid"))
+                                          stride=1, bias=bias, padding="valid",
+                                          device=device, dtype=dtype))
             in_channels = out_channels
 
-            if(not hidden_activation is None):
+            if(hidden_activation is not None and nonlinearity_c):
                 layers.append(hidden_activation())
 
         # output layer: fully connected
         layers.append(TransposeLinear(in_features=in_channels,
                                       out_features=num_cells,
-                                      bias=bias
+                                      bias=bias,
+                                      device=device, dtype=dtype
                                       ))
         
         if(not out_activation is None):
@@ -204,9 +283,12 @@ class PopulationConvNet(torch.nn.Sequential):
                        layer_rf_dilations_y : int | Tuple[int] = None,
                        layer_rf_strides_x : int | Tuple[int] = None,
                        layer_rf_strides_y : int | Tuple[int] = None,
+                       layer_groups : int | Tuple[int] = 1,
+                       layer_nonlinearity : bool | Tuple[bool] = True,
                        hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
                        out_activation    : Optional[Callable[..., torch.nn.Module]] = None,#torch.nn.Softplus,
-                       bias : bool = True):
+                       bias : bool = True,
+                       device=None, dtype=None):
         
 
         layer_channels = tuple_convert(layer_channels)
@@ -222,6 +304,9 @@ class PopulationConvNet(torch.nn.Sequential):
         layer_rf_strides_y = tuple_convert(layer_rf_strides_y, n_layers, layer_rf_strides_x)
 
         layer_spatio_temporal_rank = tuple_convert(layer_spatio_temporal_rank, n_layers)
+
+        layer_groups = tuple_convert(layer_groups, n_layers)
+        layer_nonlinearity = tuple_convert(layer_nonlinearity, n_layers)
         
         assert len(layer_channels) == len(layer_time_lengths), "must give same number of layer_time_lengths and layer_channels"
         assert len(layer_channels) == len(layer_rf_pixel_widths), "must give same number of layer_rf_pixel_widths and layer_channels"
@@ -231,13 +316,15 @@ class PopulationConvNet(torch.nn.Sequential):
         assert len(layer_channels) == len(layer_rf_strides_x), "must give same number of layer_rf_strides_x and layer_channels"
         assert len(layer_channels) == len(layer_rf_strides_y), "must give same number of layer_rf_strides_y and layer_channels"
         assert len(layer_channels) == len(layer_spatio_temporal_rank), "must give same number of layer_spatio_temporal_rank and layer_channels"
+        assert len(layer_channels) == len(layer_groups), "must give same number of layer_groups and layer_channels"
+        assert len(layer_channels) == len(layer_nonlinearity), "must give same number of layer_nonlinearity and layer_channels"
 
         layers = []
         in_channels = 1
 
         width = frame_width
         height = frame_height
-        for ker_time, ker_width, ker_height, out_channels, stride_x, stride_y, dilation_x, dilation_y, st_rank in zip(layer_time_lengths,
+        for ker_time, ker_width, ker_height, out_channels, stride_x, stride_y, dilation_x, dilation_y, st_rank, groups_c, nonlinearity_c in zip(layer_time_lengths,
                     layer_rf_pixel_widths,
                     layer_rf_pixel_heights,
                     layer_channels,
@@ -245,25 +332,29 @@ class PopulationConvNet(torch.nn.Sequential):
                     layer_rf_strides_y,
                     layer_rf_dilations_x,
                     layer_rf_dilations_y,
-                    layer_spatio_temporal_rank):
+                    layer_spatio_temporal_rank,
+                    layer_groups,
+                    layer_nonlinearity):
 
             padding_x = 0;
             padding_y = 0;
             padding_t = 0;
 
-            if(st_rank <= 0 or st_rank >= np.min(ker_height*ker_width, ker_time)):
+            if(st_rank <= 0 ):
                 layers.append(torch.nn.Conv3d(in_channels=in_channels,
-                                            out_channels=out_channels,
+                                            out_channels=out_channels, groups=groups_c,
                                             kernel_size=(ker_width, ker_height, ker_time),
-                                            stride=(stride_x, stride_y, 1), dilation=(dilation_x, dilation_y, 1), bias=bias, padding=(padding_x, padding_y, padding_t)))
+                                            stride=(stride_x, stride_y, 1), dilation=(dilation_x, dilation_y, 1),
+                                            bias=bias, padding=(padding_x, padding_y, padding_t),
+                                            device=device, dtype=dtype))
             else:
-                if(ker_time <= 1):
-                    raise NotImplementedError("no time conv")
-                else:
-                    layers.append(SpatioTemporalRFConv3D(in_channels=in_channels,
-                                            out_channels=out_channels,
+                layers.append(SpatioTemporalTuckerRFConv3D(in_channels=in_channels,
+                                            out_channels=out_channels, groups=groups_c,
                                             kernel_size=(ker_width, ker_height, ker_time),
-                                            stride=(stride_x, stride_y, 1), dilation=(dilation_x, dilation_y, 1), bias=bias, padding=(padding_x, padding_y, padding_t)))
+                                            rank=st_rank,
+                                            stride=(stride_x, stride_y, 1), dilation=(dilation_x, dilation_y, 1),
+                                            bias=bias, padding=(padding_x, padding_y, padding_t),
+                                            device=device, dtype=dtype))
 
 
             in_channels = out_channels
@@ -271,13 +362,14 @@ class PopulationConvNet(torch.nn.Sequential):
             height = compute_conv_output_size(height, ker_height, stride_y, dilation_y, padding_y)
             width  = compute_conv_output_size(width,  ker_width, stride_x, dilation_x, padding_x)
 
-            if(not hidden_activation is None):
+            if( hidden_activation is not None and nonlinearity_c):
                 layers.append(hidden_activation())
 
         # output layer: fully connected
         layers.append(TransposeLinear(in_features=[in_channels, width, height],
                                       out_features=num_cells,
-                                      bias=bias
+                                      bias=bias,
+                                      device=device, dtype=dtype
                                       ))
         if(not out_activation is None):
             layers.append(out_activation())
