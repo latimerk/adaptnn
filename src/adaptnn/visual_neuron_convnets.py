@@ -67,7 +67,7 @@ class TransposeLinear(torch.nn.Module):
         in_features = tuple_convert(in_features)
 
         self.in_features = in_features;
-        self.in_features_total = np.sum(in_features)
+        self.in_features_total = np.prod(in_features)
         self.n_in_features = len(in_features)
 
         self.linear = torch.nn.Linear(self.in_features_total, out_features, **kwargs)
@@ -269,6 +269,51 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
         msg += f', with full weight size {self.weights_shape} with factorization_type={self.factorization_type} as a {self.weight_tucker.__repr__()}'
         return msg
 
+class BatchNorm3DSpace(torch.nn.BatchNorm2d):
+    '''
+    BatchNorm2D for inputs of size (N,C,X,Y,T) where we want to normalize over each X,Y but not T.
+
+    Forward simply rearranged input to be (N,C*T,X,Y), calls torch.nn.BatchNorm2D, and then rearranges things back.
+    Besides the size time_bins (T), the options are passed to the torch.nn.BatchNorm2D constructor.
+    '''
+    def __init__(self, in_channels : int, time_bins : int, **kwargs):
+        super().__init__(in_channels*time_bins, **kwargs)
+
+    def forward(self, X):
+        X = torch.movedim(X,4,2)
+        shape_0 = X.shape
+        X = X.view(-1, self.num_features, X.shape[-2], X.shape[-1])
+
+        X = torch.nn.BatchNorm2d.forward(self,X)
+
+        X = X.view(shape_0)
+        X = torch.movedim(X,2,4)
+
+        return X
+
+
+class InstanceNorm3DSpace(torch.nn.InstanceNorm2d):
+    '''
+    InstanceNorm2d for inputs of size (N,C,X,Y,T) where we want to normalize over each X,Y but not T.
+
+    Forward simply rearranged input to be (N,C*T,X,Y), calls torch.nn.InstanceNorm2d, and then rearranges things back.
+    Besides the size time_bins (T), the options are passed to the torch.nn.InstanceNorm2d constructor.
+    '''
+    def __init__(self, in_channels : int, time_bins : int, **kwargs):
+        super().__init__(in_channels*time_bins, **kwargs)
+
+    def forward(self, X):
+        X = torch.movedim(X,4,2)
+        shape_0 = X.shape
+        X = X.view(-1, self.num_features, X.shape[-2], X.shape[-1])
+
+        X = torch.nn.InstanceNorm2d.forward(self,X)
+
+        X = X.view(shape_0)
+        X = torch.movedim(X,2,4)
+
+        return X
+
 
 '''
 ===============================================================================
@@ -281,6 +326,7 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
 class PopulationFullFieldNet(torch.nn.Sequential):
     # two layer, 1-D convolution followed by fullly connected layer
     def __init__(self, num_cells : int,
+                       in_channels : int = 1,
                        layer_channels : int | Tuple[int] = (8,8),
                        layer_time_lengths : int | Tuple[int] = (100,40),
                        layer_groups : int | Tuple[int] = 1,
@@ -292,8 +338,10 @@ class PopulationFullFieldNet(torch.nn.Sequential):
                        device=None, dtype=None, verbose : bool = True):
         '''
         Builds a sequential model as a series of temporal convolution (1-D) layers, followed by a fully connected linear layer for the output.
+        This model does not include normalization layers right now.
         Args:
             num_cells : the number of neurons in the population being modelled (output size)
+            in_channels : (C) the number of input channels
             The following are lists for each convolution layer (or a constant if the same for each layer, except for layer_channels)
                 layer_channels : the number of output channels. 
                                  IMPORTANT: The length of this parameter controls the number of layers. If it is a constant, only 1 layer will be created
@@ -308,7 +356,7 @@ class PopulationFullFieldNet(torch.nn.Sequential):
             device : which device to place model on
             dtype : the dtype of all the layers
 
-            Expected input-output size for N samples of length T: (N,T+time_padding) -> (N,num_cells,T)
+            Expected input-output size for N samples of length T: (N,C,T+time_padding) -> (N,num_cells,T)
         '''
         
         layer_channels = tuple_convert(layer_channels)
@@ -328,7 +376,6 @@ class PopulationFullFieldNet(torch.nn.Sequential):
         if(verbose): print(f"Building multi-layer temporal convolutional model for {num_cells} neurons and full-field stimuli.")
 
         layers = []
-        in_channels = 1
         for ker_size, out_channels, groups_c, nonlinearity_c, bias_c in zip(layer_time_lengths,
                                                     layer_channels,
                                                     layer_groups,
@@ -371,7 +418,7 @@ class PopulationFullFieldNet(torch.nn.Sequential):
     def time_padding(self) -> int:
         '''
         The total number of time bins that are needed to be given in each input preceding the first output.
-        input-output size: (N,T+time_padding) -> (N,num_cells,T)
+        input-output size: (N,C,T+time_padding) -> (N,num_cells,T)
         '''
         return np.sum(self.layer_time_lengths_)-len(self.layer_time_lengths_)
 
@@ -388,6 +435,8 @@ class PopulationConvNet(torch.nn.Sequential):
     def __init__(self, num_cells : int,
                        frame_width : int ,
                        frame_height : int,
+                       in_channels : int = 1,
+                       in_time : int = 1,
                        layer_channels : int | Tuple[int] = (8,8),
                        layer_time_lengths : int | Tuple[int] = (100,40),
                        layer_spatio_temporal_rank : int | List[int|Tuple] = 2,
@@ -402,16 +451,24 @@ class PopulationConvNet(torch.nn.Sequential):
                        layer_groups : int | Tuple[int] = 1,
                        layer_bias : bool | Tuple[bool] = True,
                        layer_nonlinearity : bool | Tuple[bool] = True,
+                       layer_normalization : bool | str | Tuple = True,
                        hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
                        out_activation    : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
                        out_bias : bool = True,
-                       device=None, dtype=None, verbose : bool = True):
+                       out_normalization : bool | str = True,
+                       device=None, dtype=None, verbose : bool = True,
+                       normalization_options ={"affine" : False,
+                                               "track_running_state" : False}
+                    ):
         '''
         Builds a sequential model as a series of spatiotemporal convolution (3-D) layers, followed by a fully connected linear layer for the output.
+        The model can include normalization layers at each stage.
         Args:
             num_cells : the number of neurons in the population being modelled (output size)
             frame_width : the width of the input video
             frame_height : the height of the input video
+            in_channels : (C) the number of input channels
+            in_time : (T) the number of time bins per input. Only needed for normalization layers when normalization_options affine=True or track_running_state=True
             The following are lists for each convolution layer (or a constant if the same for each layer, except for layer_channels)
                 layer_channels : the number of output channels. 
                                  IMPORTANT: The length of this parameter controls the number of layers. If it is a constant, only 1 layer will be created
@@ -426,16 +483,27 @@ class PopulationConvNet(torch.nn.Sequential):
                                                            If None, uses a full-rank convolution (standard torch.nn.Conv3D).   
                 layer_spatio_temporal_rank : the rank of the Tucker decomposition of the weights if layer_spatio_temporal_factorization_type is not None                                                                                                 
                 layer_nonlinearity : true/false if a nonlinearity is used after this layer
+                layer_normalization : to include a normalization in the input to this channel. I
+                                      If True, then BatchNorm2D over space.
+                                      If '3D', then BatchNorm3D over space/time.
+                                      If 'instance', then InstanceNorm2D over space.
+                                      If 'instance3D', then InstanceNorm3D over space/time.
                 
             hidden_activation : the activation function to be used after each convolution layer (if layer_nonlinearity is True)
             out_bias : if final linear layer has a bias
             out_activation : the activation function following the final output nonlinearity
+            out_normalization : to include a normalization or not before the final output linearity 
+            normalization_options : keyword arguments to normalization layers. Right now, the same args are passed to all layers.
+                                    By default, no momentum or affine weight is used. This choice makes sizing inputs easier. 
             verbose : to print model info during instantiation
             device : which device to place model on
             dtype : the dtype of all the layers
 
-            Expected input-output size for N samples of length T: (N,frame_width,frame_height,T+time_padding) -> (N,num_cells,T)
+            Expected input-output size for N samples of length T: (N,C,frame_width,frame_height,T+time_padding) -> (N,num_cells,T)
         '''
+
+        if(in_channels is None):
+            in_channels = 1
 
         layer_channels = tuple_convert(layer_channels)
         n_layers = len(layer_channels);
@@ -457,6 +525,7 @@ class PopulationConvNet(torch.nn.Sequential):
         layer_bias = tuple_convert(layer_bias, n_layers)
         layer_groups = tuple_convert(layer_groups, n_layers)
         layer_nonlinearity = tuple_convert(layer_nonlinearity, n_layers)
+        layer_normalization = tuple_convert(layer_normalization, n_layers)
         
         assert len(layer_channels) == len(layer_time_lengths), "must give same number of layer_time_lengths and layer_channels"
         assert len(layer_channels) == len(layer_rf_pixel_widths), "must give same number of layer_rf_pixel_widths and layer_channels"
@@ -469,16 +538,27 @@ class PopulationConvNet(torch.nn.Sequential):
         assert len(layer_channels) == len(layer_groups), "must give same number of layer_groups and layer_channels"
         assert len(layer_channels) == len(layer_nonlinearity), "must give same number of layer_nonlinearity and layer_channels"
         assert len(layer_channels) == len(layer_bias), "must give same number of layer_bias and layer_channels"
+        assert len(layer_channels) == len(layer_normalization), "must give same number of layer_bias and layer_normalization"
 
         layers = []
-        in_channels = 1
+        
 
         width = frame_width
         height = frame_height
+        total_time_padding = 0
 
         if(verbose): print(f"Building multi-layer convolutional model for {num_cells} neurons and image size {width} x {height}")
 
-        for ker_time, ker_width, ker_height, out_channels, stride_x, stride_y, dilation_x, dilation_y, st_rank, factorization_type, groups_c, nonlinearity_c, bias_c in zip(layer_time_lengths,
+        for (ker_time, ker_width, ker_height, 
+             out_channels, 
+             stride_x, stride_y, 
+             dilation_x, dilation_y, 
+             st_rank, factorization_type, 
+             groups_c, 
+             nonlinearity_c, 
+             normalization_c,
+             bias_c
+            ) in zip(layer_time_lengths,
                     layer_rf_pixel_widths,
                     layer_rf_pixel_heights,
                     layer_channels,
@@ -490,13 +570,34 @@ class PopulationConvNet(torch.nn.Sequential):
                     layer_spatio_temporal_factorization_type,
                     layer_groups,
                     layer_nonlinearity,
+                    layer_normalization,
                     bias_c):
+            
 
             padding_x = 0;
             padding_y = 0;
             padding_t = 0;
 
             kernel_size = (ker_width, ker_height, ker_time)
+
+            
+            input_time_bins_c = max(1,input_time_bins_c - total_time_padding)
+
+            if(normalization_c == True):
+                if(verbose): print(f"Adding 2D batch normalization layer.")
+                layers.append(BatchNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+            elif(normalization_c == 'instance'):
+                if(verbose): print(f"Adding 2D instance normalization layer.")
+                layers.append(InstanceNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+            elif(normalization_c == '3D'):
+                if(verbose): print(f"Adding 3D batch normalization layer.")
+                layers.append(torch.nn.BatchNorm3d(in_channels=in_channels, **normalization_options))
+            elif(normalization_c == 'instance3D'):
+                if(verbose): print(f"Adding 3D instance normalization layer.")
+                layers.append(torch.nn.InstanceNorm3d(in_channels=in_channels, **normalization_options))
+            else:
+                raise ValueError(f"Unkown normalization option: {normalization_c}")
+
 
             if(layer_spatio_temporal_factorization_type is None):
                 if(verbose): print(f"Adding full-rank convolutional layer of size {kernel_size} and {out_channels} channels.")
@@ -522,12 +623,31 @@ class PopulationConvNet(torch.nn.Sequential):
 
             height = compute_conv_output_size(height, ker_height, stride_y, dilation_y, padding_y)
             width  = compute_conv_output_size(width,  ker_width, stride_x, dilation_x, padding_x)
+            total_time_padding += ker_time-1
 
             if( hidden_activation is not None and nonlinearity_c):
                 if(verbose): print(f"Adding nonlinearity: {hidden_activation.__name__}.")
                 layers.append(hidden_activation())
 
         # output layer: fully connected
+        
+        input_time_bins_c = max(1,input_time_bins_c - total_time_padding)
+
+        if(out_normalization == True):
+            if(verbose): print(f"Adding final 2D batch normalization layer.")
+            layers.append(BatchNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+        elif(out_normalization == 'instance'):
+            if(verbose): print(f"Adding final 2D instance normalization layer.")
+            layers.append(InstanceNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+        elif(out_normalization == '3D'):
+            if(verbose): print(f"Adding final 3D batch normalization layer.")
+            layers.append(torch.nn.BatchNorm3d(in_channels=in_channels, **normalization_options))
+        elif(out_normalization == 'instance3D'):
+            if(verbose): print(f"Adding final 3D instance normalization layer.")
+            layers.append(torch.nn.InstanceNorm3d(in_channels=in_channels, **normalization_options))
+        else:
+            raise ValueError(f"Unknown normalization option: {out_normalization}")
+            
         in_features = [in_channels, width, height]
         if(verbose): print(f"Adding full-connected linear layer: {in_features} to {num_cells}.")
         layers.append(TransposeLinear(in_features=in_features,
@@ -557,7 +677,7 @@ class PopulationConvNet(torch.nn.Sequential):
     def time_padding(self) -> int:
         '''
         The total number of time bins that are needed to be given in each input preceding the first output.
-        input-output size: (N,X,Y,T+time_padding) -> (N,num_cells,T)
+        input-output size: (N,C,X,Y,T+time_padding) -> (N,num_cells,T)
         '''
         return np.sum(self.layer_time_lengths_)-len(self.layer_time_lengths_)
 

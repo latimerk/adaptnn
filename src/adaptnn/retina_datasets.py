@@ -107,19 +107,22 @@ class NiruDataset(torch.utils.data.Dataset):
         return len(self.start_idx_X_train)
     
     def __getitem__(self, idx) -> tuple[torch.Tensor, torch.Tensor]:
+        '''
+        size (1,X,Y,T+time_padding_bins), (num_cells,T)
+        '''
         start_x = self.start_idx_X_train[idx]
         end_x   = start_x + self.X_time
 
         start_y = self.start_idx_Y_train[idx]
         end_y   = start_y + self.segment_length_bins
-        return self.X_train[:,:,start_x:end_x], self.Y_train[:,start_y:end_y]
+        return self.X_train[:,:,start_x:end_x].unsqueeze(0), self.Y_train[:,start_y:end_y]
     
     def get_test(self) -> tuple[torch.Tensor, torch.Tensor]:
         '''
         Returns:
-            tuple (test input,test output) of sizes (1,X,Y,T+time_padding_bins),(1,num_cells,T)
+            tuple (test input,test output) of sizes (1,X,Y,T+time_padding_bins),(num_cells,T)
         '''
-        return self.X_test.unsqueeze(0), self.Y_test[:,self.time_padding_bins:].unsqueeze(1)
+        return self.X_test.unsqueeze(0), self.Y_test[:,self.time_padding_bins:]
     
     @property
     def frame_width(self) -> int:
