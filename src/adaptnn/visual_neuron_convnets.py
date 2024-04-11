@@ -70,7 +70,7 @@ class TransposeLinear(torch.nn.Module):
         self.in_features_total = np.sum(in_features)
         self.n_in_features = len(in_features)
 
-        self.linear_ = torch.nn.Linear(self.in_features_total, out_features, **kwargs)
+        self.linear = torch.nn.Linear(self.in_features_total, out_features, **kwargs)
 
 
     def forward(self, X):
@@ -81,22 +81,35 @@ class TransposeLinear(torch.nn.Module):
         # flips dimensions
         X = torch.transpose(X, dim0=-2, dim1=-1)
         # linear op
-        X = self.linear_(X)
+        X = self.linear(X)
         # flips dimensions back: idea is to get a (N_samples, Neuron, Time) output tensor
         X = torch.transpose(X, dim0=-2, dim1=-1)
         return X    
 
     @property
     def weight(self):
-        return self.linear_.weight        
+        return self.linear.weight        
+    
+    def __repr__(self):
+        msg = (f'{self.__class__.__name__} wrapping {self.linear.__repr__()}')
+        return msg
 
 class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
     def __init__(self, in_channels : int, out_channels : int,
                  kernel_size : tuple, rank : int,
-                 bias : bool = True,
                  factorization_type = 'spatial',
-                 stride=1, padding=0, dilation=1, groups = 1,
+                 bias : bool = True,
+                 stride=1, padding=0, dilation=1, groups=1,
                  device=None, dtype=None):
+        '''
+        Effectively an altered version of a 3D tltorch.FactorizedConv layer with reshaping of space in the factorized weights to try to avoid some overparameterization.
+        Args:
+            factorization_type : {'spatial', 'spatialchannel'} How the spatial factors are parameterized.
+                                If 'spatial' = The x & y spatial factors combined into vectors of length (x*y). This avoids needing full-rank x,y components
+                                If 'spatialchannel' = The x & y spatial factors and input channels combined into vectors of length (x*y*in_channels).
+            rank: The Tucker rank of the weights given the factorization used. For factorization_type='spatial', the rank is (out_channel rank, in_channel rank, spatial rank, temporal rank)
+            The remaining arguments are just as for a torch.nn.Conv3D
+        '''
         
         super().__init__()
 
@@ -117,27 +130,27 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
         self.space_channels  =  kernel_size[0] * kernel_size[1]
         self.in_group_channels = (in_channels//groups);
 
-        self.weights_shape_ = (out_channels, self.in_group_channels) +  kernel_size
+        self.weights_shape = (out_channels, self.in_group_channels) +  kernel_size
 
         self.factorization_type = factorization_type
         if(self.factorization_type == 'spatial'):
-            self.factorization_shape_ = (out_channels, self.in_group_channels, kernel_size[0]*kernel_size[1], kernel_size[2])
+            self.factorization_shape = (out_channels, self.in_group_channels, kernel_size[0]*kernel_size[1], kernel_size[2])
             rank = list(tuple_convert(rank, 4))
-            assert len(rank) == len(self.factorization_shape_), "rank must be shape (out_channels, in_channels, space, time)"
+            assert len(rank) == len(self.factorization_shape), "rank must be shape (out_channels, in_channels, space, time)"
         elif(self.factorization_type == 'spatialchannel'):
-            self.factorization_shape_ = (out_channels, self.in_group_channels * kernel_size[0]*kernel_size[1], kernel_size[2])
+            self.factorization_shape = (out_channels, self.in_group_channels * kernel_size[0]*kernel_size[1], kernel_size[2])
             rank = list(tuple_convert(rank, 3))
-            assert len(rank) == len(self.factorization_shape_), "rank must be shape (out_channels, in_channels&space, time)"
+            assert len(rank) == len(self.factorization_shape), "rank must be shape (out_channels, in_channels&space, time)"
         else:
             raise ValueError(f"Invalid factorization_type: {factorization_type}")
         
         # make sure ranks are not too large
-        for xxi, xx in enumerate(self.factorization_shape_):
+        for xxi, xx in enumerate(self.factorization_shape):
             rank[xxi] = min(rank[xxi],xx);
         rank = tuple(rank)
 
         # self.weights_space_ = torch.zeros(out_channels, in_channels/groups, kernel_size[0], kernel_size[1], rank)
-        self.weight_tucker = tltorch.FactorizedTensor.new(self.factorization_shape_,
+        self.weight_tucker = tltorch.FactorizedTensor.new(self.factorization_shape,
                                                    rank=rank, factorization="Tucker",
                                                    device=device, dtype=dtype)
         if(bias):
@@ -155,21 +168,28 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
 
     @torch.no_grad()
     def reset_parameters(self, std = 1, std_bias = 1, generator=None):
+        '''
+        Sets the parameters so that the weights (and bias) will be normal of mean 0 with the given standard deviation.
+        The factorized weights are initialized using tltorch.factorized_tensors.init.tucker_init to acheive this.
+        '''
         if(self.bias is not None):
             torch.nn.init.normal_(self.bias, mean=0.0, std=std_bias, generator=generator)
 
         tltorch.factorized_tensors.init.tucker_init(self.weight_tucker, std=std)
 
     @property
-    def weight(self):
-        return self.weight_tucker.to_tensor().view(self.weights_shape_)
+    def weight(self) -> torch.Tensor:
+        '''
+        The full, unfactorized convolution weights
+        '''
+        return self.weight_tucker.to_tensor().view(self.weights_shape)
 
     def forward(self, X):
 
         return SpatioTemporalTuckerRFConv3D.tucker_conv(X,
                                                         self.weight_tucker,
                                                         self.factorization_type,
-                                                        self.weights_shape_,
+                                                        self.weights_shape,
                                                         bias=self.bias,
                                                         stride=self.stride,
                                                         padding=self.padding,
@@ -181,9 +201,11 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
                     factorization_type : str,
                     weight_shape_0 : tuple, 
                     bias : torch.Tensor = None, 
-                    stride : int | Tuple[int] = 1, padding : int | Tuple[int] = 0, dilation : int | Tuple[int] = 1):
+                    stride : int | Tuple[int] = 1,
+                    padding : int | Tuple[int] = 0,
+                    dilation : int | Tuple[int] = 1):
         '''
-        Specialized version altered from the tensory torch library for my space-time separable kernels
+        Specialized version slightly altered from the tensory torch library for my space-time separable kernels for reshaping space
         tltorch.functional.convolutions.tucker_conv
         '''
         # Extract the rank from the actual decomposition in case it was changed by, e.g. dropout
@@ -240,6 +262,12 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
 
         return x
  
+    def __repr__(self):
+        msg = (f'{self.__class__.__name__} wrapping a tensorly torch factorized Conv3D('
+               + f'{self.in_channels}, {self.out_channels},'
+               + f'kernel_size={self.kernel_size}, stride={self.stride}, padding={self.padding}, dilation={self.dilation}, bias={self.bias is not None})')
+        msg += f', with full weight size {self.weights_shape} with factorization_type={self.factorization_type} as a {self.weight_tucker.__repr__()}'
+        return msg
 
 
 '''
@@ -253,16 +281,36 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
 class PopulationFullFieldNet(torch.nn.Sequential):
     # two layer, 1-D convolution followed by fullly connected layer
     def __init__(self, num_cells : int,
-                       layer_channels : int | Tuple[int] = [8,8],
-                       layer_time_lengths : int | Tuple[int] = [100,40],
+                       layer_channels : int | Tuple[int] = (8,8),
+                       layer_time_lengths : int | Tuple[int] = (100,40),
                        layer_groups : int | Tuple[int] = 1,
+                       layer_bias : bool | Tuple[bool] = True,
                        layer_nonlinearity : bool | Tuple[bool] = True,
                        hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
                        out_activation    : Optional[Callable[..., torch.nn.Module]] = None, #torch.nn.Softplus,
-                       bias : bool = True,
+                       out_bias : bool = True,
                        device=None, dtype=None, verbose : bool = True):
-        
+        '''
+        Builds a sequential model as a series of temporal convolution (1-D) layers, followed by a fully connected linear layer for the output.
+        Args:
+            num_cells : the number of neurons in the population being modelled (output size)
+            The following are lists for each convolution layer (or a constant if the same for each layer, except for layer_channels)
+                layer_channels : the number of output channels. 
+                                 IMPORTANT: The length of this parameter controls the number of layers. If it is a constant, only 1 layer will be created
+                layer_time_lengths : convolution kernel time length
+                layer_groups : the convolution groups parameter.
+                layer_bias : to include bias term
+                layer_nonlinearity : true/false if a nonlinearity is used after this layer.
+            hidden_activation : the activation function to be used after each convolution layer (if layer_nonlinearity is True)
+            out_bias : if final linear layer has a bias
+            out_activation : the activation function following the final output nonlinearity
+            verbose : to print model info during instantiation
+            device : which device to place model on
+            dtype : the dtype of all the layers
 
+            Expected input-output size for N samples of length T: (N,T+time_padding) -> (N,num_cells,T)
+        '''
+        
         layer_channels = tuple_convert(layer_channels)
         n_layers = len(layer_channels);
 
@@ -270,25 +318,28 @@ class PopulationFullFieldNet(torch.nn.Sequential):
         layer_time_lengths = tuple_convert(layer_time_lengths, n_layers)
         layer_groups = tuple_convert(layer_groups, n_layers)
         layer_nonlinearity = tuple_convert(layer_nonlinearity, n_layers)
+        layer_bias = tuple_convert(layer_bias, n_layers)
         
         assert len(layer_channels) == len(layer_time_lengths), "must give same number of layer_time_lengths and layer_channels"
         assert len(layer_channels) == len(layer_groups), "must give same number of layer_groups and layer_channels"
         assert len(layer_channels) == len(layer_nonlinearity), "must give same number of layer_nonlinearity and layer_channels"
+        assert len(layer_channels) == len(layer_bias), "must give same number of layer_bias and layer_channels"
 
         if(verbose): print(f"Building multi-layer temporal convolutional model for {num_cells} neurons and full-field stimuli.")
 
         layers = []
         in_channels = 1
-        for ker_size, out_channels, groups_c, nonlinearity_c in zip(layer_time_lengths,
+        for ker_size, out_channels, groups_c, nonlinearity_c, bias_c in zip(layer_time_lengths,
                                                     layer_channels,
                                                     layer_groups,
-                                                    layer_nonlinearity):
+                                                    layer_nonlinearity,
+                                                    layer_bias):
             # linear layer
             if(verbose): print(f"Adding full-rank convolutional layer of size {ker_size} and {out_channels} channels.")
             layers.append(torch.nn.Conv1d(in_channels=in_channels,
                                           out_channels=out_channels, groups=groups_c,
                                           kernel_size=ker_size,
-                                          stride=1, bias=bias, padding="valid",
+                                          stride=1, bias=bias_c, padding="valid",
                                           device=device, dtype=dtype))
             in_channels = out_channels
             # add activation
@@ -300,7 +351,7 @@ class PopulationFullFieldNet(torch.nn.Sequential):
         if(verbose): print(f"Adding full-connected linear layer: {in_channels} to {num_cells}.")
         layers.append(TransposeLinear(in_features=in_channels,
                                       out_features=num_cells,
-                                      bias=bias,
+                                      bias=out_bias,
                                       device=device, dtype=dtype
                                       ))
         
@@ -318,6 +369,10 @@ class PopulationFullFieldNet(torch.nn.Sequential):
 
     @property
     def time_padding(self) -> int:
+        '''
+        The total number of time bins that are needed to be given in each input preceding the first output.
+        input-output size: (N,T+time_padding) -> (N,num_cells,T)
+        '''
         return np.sum(self.layer_time_lengths_)-len(self.layer_time_lengths_)
 
 '''
@@ -345,12 +400,42 @@ class PopulationConvNet(torch.nn.Sequential):
                        layer_rf_strides_x : int | Tuple[int] = None,
                        layer_rf_strides_y : int | Tuple[int] = None,
                        layer_groups : int | Tuple[int] = 1,
+                       layer_bias : bool | Tuple[bool] = True,
                        layer_nonlinearity : bool | Tuple[bool] = True,
                        hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
                        out_activation    : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
-                       bias : bool = True,
+                       out_bias : bool = True,
                        device=None, dtype=None, verbose : bool = True):
-        
+        '''
+        Builds a sequential model as a series of spatiotemporal convolution (3-D) layers, followed by a fully connected linear layer for the output.
+        Args:
+            num_cells : the number of neurons in the population being modelled (output size)
+            frame_width : the width of the input video
+            frame_height : the height of the input video
+            The following are lists for each convolution layer (or a constant if the same for each layer, except for layer_channels)
+                layer_channels : the number of output channels. 
+                                 IMPORTANT: The length of this parameter controls the number of layers. If it is a constant, only 1 layer will be created
+                layer_rf_pixel_widths : convultion kernel space width
+                layer_rf_pixel_heights : convultion kernel space height
+                layer_rf_dilations_x/y : the dilation of the convolution in x/y (note: no dialtion is allowed in time right now)
+                layer_rf_strides_x/y : the stride of the convolution in x/y (note: stride in time is fixed to 1)
+                layer_time_lengths : convolution kernel time length
+                layer_groups : the convolution groups parameter.
+                layer_bias : to include bias term
+                layer_spatio_temporal_factorization_type : 'spatial'  'spatialchannel', or None. How to factorize the weights for the convolution using a Tucker decomposition.
+                                                           If None, uses a full-rank convolution (standard torch.nn.Conv3D).   
+                layer_spatio_temporal_rank : the rank of the Tucker decomposition of the weights if layer_spatio_temporal_factorization_type is not None                                                                                                 
+                layer_nonlinearity : true/false if a nonlinearity is used after this layer
+                
+            hidden_activation : the activation function to be used after each convolution layer (if layer_nonlinearity is True)
+            out_bias : if final linear layer has a bias
+            out_activation : the activation function following the final output nonlinearity
+            verbose : to print model info during instantiation
+            device : which device to place model on
+            dtype : the dtype of all the layers
+
+            Expected input-output size for N samples of length T: (N,frame_width,frame_height,T+time_padding) -> (N,num_cells,T)
+        '''
 
         layer_channels = tuple_convert(layer_channels)
         n_layers = len(layer_channels);
@@ -369,6 +454,7 @@ class PopulationConvNet(torch.nn.Sequential):
         layer_spatio_temporal_factorization_type = tuple_convert(layer_spatio_temporal_factorization_type, n_layers)
         # layer_spatio_temporal_rank = tuple_convert(layer_spatio_temporal_rank, n_layers)
 
+        layer_bias = tuple_convert(layer_bias, n_layers)
         layer_groups = tuple_convert(layer_groups, n_layers)
         layer_nonlinearity = tuple_convert(layer_nonlinearity, n_layers)
         
@@ -382,6 +468,7 @@ class PopulationConvNet(torch.nn.Sequential):
         assert len(layer_channels) == len(layer_spatio_temporal_rank), "must give same number of layer_spatio_temporal_rank and layer_channels"
         assert len(layer_channels) == len(layer_groups), "must give same number of layer_groups and layer_channels"
         assert len(layer_channels) == len(layer_nonlinearity), "must give same number of layer_nonlinearity and layer_channels"
+        assert len(layer_channels) == len(layer_bias), "must give same number of layer_bias and layer_channels"
 
         layers = []
         in_channels = 1
@@ -391,7 +478,7 @@ class PopulationConvNet(torch.nn.Sequential):
 
         if(verbose): print(f"Building multi-layer convolutional model for {num_cells} neurons and image size {width} x {height}")
 
-        for ker_time, ker_width, ker_height, out_channels, stride_x, stride_y, dilation_x, dilation_y, st_rank, factorization_type, groups_c, nonlinearity_c in zip(layer_time_lengths,
+        for ker_time, ker_width, ker_height, out_channels, stride_x, stride_y, dilation_x, dilation_y, st_rank, factorization_type, groups_c, nonlinearity_c, bias_c in zip(layer_time_lengths,
                     layer_rf_pixel_widths,
                     layer_rf_pixel_heights,
                     layer_channels,
@@ -402,7 +489,8 @@ class PopulationConvNet(torch.nn.Sequential):
                     layer_spatio_temporal_rank,
                     layer_spatio_temporal_factorization_type,
                     layer_groups,
-                    layer_nonlinearity):
+                    layer_nonlinearity,
+                    bias_c):
 
             padding_x = 0;
             padding_y = 0;
@@ -410,13 +498,13 @@ class PopulationConvNet(torch.nn.Sequential):
 
             kernel_size = (ker_width, ker_height, ker_time)
 
-            if(st_rank is None or (isinstance(st_rank,int) and st_rank <= 0)):
+            if(layer_spatio_temporal_factorization_type is None):
                 if(verbose): print(f"Adding full-rank convolutional layer of size {kernel_size} and {out_channels} channels.")
                 layers.append(torch.nn.Conv3d(in_channels=in_channels,
                                             out_channels=out_channels, groups=groups_c,
                                             kernel_size=kernel_size,
                                             stride=(stride_x, stride_y, 1), dilation=(dilation_x, dilation_y, 1),
-                                            bias=bias, padding=(padding_x, padding_y, padding_t),
+                                            bias=bias_c, padding=(padding_x, padding_y, padding_t),
                                             device=device, dtype=dtype))
             else:
                 if(verbose): print(f"Adding Tucker convolutional layer of size {kernel_size} and {out_channels} channels with factorization type {factorization_type} and rank {st_rank}.")
@@ -426,7 +514,7 @@ class PopulationConvNet(torch.nn.Sequential):
                                             rank=st_rank,
                                             factorization_type = factorization_type,
                                             stride=(stride_x, stride_y, 1), dilation=(dilation_x, dilation_y, 1),
-                                            bias=bias, padding=(padding_x, padding_y, padding_t),
+                                            bias=bias_c, padding=(padding_x, padding_y, padding_t),
                                             device=device, dtype=dtype))
 
 
@@ -444,7 +532,7 @@ class PopulationConvNet(torch.nn.Sequential):
         if(verbose): print(f"Adding full-connected linear layer: {in_features} to {num_cells}.")
         layers.append(TransposeLinear(in_features=in_features,
                                       out_features=num_cells,
-                                      bias=bias,
+                                      bias=out_bias,
                                       device=device, dtype=dtype
                                       ))
         if(not out_activation is None):
@@ -467,19 +555,34 @@ class PopulationConvNet(torch.nn.Sequential):
 
     @property
     def time_padding(self) -> int:
+        '''
+        The total number of time bins that are needed to be given in each input preceding the first output.
+        input-output size: (N,X,Y,T+time_padding) -> (N,num_cells,T)
+        '''
         return np.sum(self.layer_time_lengths_)-len(self.layer_time_lengths_)
 
 '''
 ===============================================================================
 ===============================================================================
 Regularization functions
+- Elastic net + fused lasso penalties (in space&time dimensions) on convolution kernels
 ===============================================================================
 ===============================================================================
 '''    
 
-def conv_penalty(K, en_lambda = None, en_alpha = None, fl_lambda_x = None, fl_lambda_y = None, fl_lambda_t = None):
+def conv_penalty(K : torch.Tensor, en_lambda = None, en_alpha : float = None, fl_lambda_x = None, fl_lambda_y = None, fl_lambda_t : float = None) -> torch.Tensor:
     '''
-    Sum of 
+    Sum of elastic net & fused lasso penalties
+    Args:
+        K : (..., [space_x, space_y], time) : The kernel to penalize
+            Space dimensions only needed if spatiotemporal kernels and fl_lambda_x/y are used.
+        en_lambda : [0,inf) the elastic net weight
+        en_alpha  : [0,1] the elastic net weight between l1 or l2 penalties. 
+                    e.g.: en_alpha = 1 means l2 penalty is 0 and l1 penalty is en_lambda.
+                          en_alpha = 0.25 means l2 penalty is 0.75*en_lambda and l1 penalty is 0.25*en_lambda.
+        fl_lambda_x/y/z : weights for the fused lasso penalty along each dimension
+    Returns:
+        A scalar total penalty
     '''
 
     l2_p = en_lambda*(1-en_alpha)/2
@@ -520,31 +623,59 @@ def conv_penalty(K, en_lambda = None, en_alpha = None, fl_lambda_x = None, fl_la
 
     return sx + sy + st + sl2 + sl1
 
-def penalize_convnet_weights(model, en_lambda = None, en_alpha = None, fl_lambda_x = None, fl_lambda_y = None, fl_lambda_t = None,
-                                    lin_en_lambda = None, lin_en_alpha = None):
+def penalize_convnet_weights(model : torch.nn.Sequential,
+                             en_lambda : float | Tuple[float] = None,
+                             en_alpha : float | Tuple[float]  = None,
+                             fl_lambda_x : float | Tuple[float]  = None,
+                             fl_lambda_y  : float | Tuple[float] = None,
+                             fl_lambda_t : float | Tuple[float]  = None,
+                             lin_en_lambda  : float | Tuple[float] = None,
+                             lin_en_alpha  : float | Tuple[float] = None) -> torch.Tensor:
+    '''
+    Computes the sum of elastic net & fused lasso penalties on the weights of a sequence of linear layers.
+    For fully connected layers, only the elastic net is used.
+    Args:
+        model : the sequential network model. Ideally is one of the models defined in this module
+        en_lambda : [0,inf) the elastic net weight. Can be scalar or tuple containing penalty for each linear layer (in order).
+        en_alpha  : [0,1] the elastic net weight between l1 or l2 penalties.  Can be scalar or tuple containing penalty for each linear layer (in order).
+                    e.g.: en_alpha = 1 means l2 penalty is 0 and l1 penalty is en_lambda.
+                          en_alpha = 0.25 means l2 penalty is 0.75*en_lambda and l1 penalty is 0.25*en_lambda.
+        fl_lambda_x/y/z : weights for the fused lasso penalty along each dimension. Can be scalar or tuple containing penalty for each linear layer (in order).
+    Returns:
+        A scalar total penalty to be added to a loss function.
+    '''
     ctr = 0
     lin_ctr = 0
 
-    en_lambda = tuple_convert(en_lambda, len(model), (None,) * len(model))
-    en_alpha  = tuple_convert(en_alpha, len(model), (None,) * len(model))
-    fl_lambda_x  = tuple_convert(fl_lambda_x, len(model), (None,) * len(model))
-    fl_lambda_y  = tuple_convert(fl_lambda_y, len(model), (None,) * len(model))
-    fl_lambda_t  = tuple_convert(fl_lambda_t, len(model), (None,) * len(model))
+    num_lin_layers = 0
+    for xx in model:
+        if(isinstance(xx, tltorch.FactorizedConv | torch.nn.Conv1d | torch.nn.Conv2d | torch.nn.Conv3d | SpatioTemporalTuckerRFConv3D | torch.nn.Linear | TransposeLinear))):
+            num_lin_layers += 1
 
-    lin_en_lambda = tuple_convert(lin_en_lambda, len(model), (None,) * len(model))
-    lin_en_alpha  = tuple_convert(lin_en_alpha, len(model), (None,) * len(model))
+    base = (None,) * num_lin_layers
+
+    en_lambda = tuple_convert(en_lambda, num_lin_layers, base)
+    en_alpha  = tuple_convert(en_alpha,  num_lin_layers, base)
+    fl_lambda_x  = tuple_convert(fl_lambda_x, num_lin_layers, base)
+    fl_lambda_y  = tuple_convert(fl_lambda_y, num_lin_layers, base)
+    fl_lambda_t  = tuple_convert(fl_lambda_t, num_lin_layers, base)
+
+    lin_en_lambda = tuple_convert(lin_en_lambda, num_lin_layers, base)
+    lin_en_alpha  = tuple_convert(lin_en_alpha, num_lin_layers, base)
 
     p = 0
     for xx in model:
         if(isinstance(xx, torch.nn.Conv1d)):
             p += conv_penalty(xx.weight, en_lambda=en_lambda[ctr], en_alpha=en_alpha[ctr], fl_lambda_t=fl_lambda_t[ctr])
             ctr += 1
-        elif(isinstance(xx, torch.nn.Conv2d)):
-            raise NotImplementedError("Not sure if 2D is space/time or space/space")
         elif(isinstance(xx, torch.nn.Conv3d | SpatioTemporalTuckerRFConv3D)):
             p += conv_penalty(xx.weight, en_lambda=en_lambda[ctr], en_alpha=en_alpha[ctr], fx_lambda_t=fl_lambda_x[ctr], fl_lambda_y=fl_lambda_y[ctr], fl_lambda_t=fl_lambda_t[ctr])
             ctr += 1
         elif(isinstance(xx, torch.nn.Linear | TransposeLinear)):
             p += conv_penalty(xx.weight, en_lambda=lin_en_lambda[lin_ctr], en_alpha=lin_en_alpha[lin_ctr])
             lin_ctr += 1
+        elif(isinstance(xx, torch.nn.Conv2d)):
+            raise NotImplementedError("Not implemented for 2D convs yet: not sure if 2D is space/time or space/space.")
+        elif(isinstance(xx, tltorch.FactorizedConv)):
+            raise NotImplementedError("Not implemented for tltorch factorized convultions yet.")
     return p
