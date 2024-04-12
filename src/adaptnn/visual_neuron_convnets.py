@@ -357,7 +357,7 @@ class PopulationFullFieldNet(torch.nn.Sequential):
                                                     layer_nonlinearity,
                                                     layer_bias):
             # linear layer
-            if(verbose): print(f"Adding full-rank convolutional layer of size {ker_size} and {out_channels} channels.")
+            if(verbose): print(f"Adding full-rank convolutional layer of input length {ker_size} and {out_channels} channels.")
             layers.append(torch.nn.Conv1d(in_channels=in_channels,
                                           out_channels=out_channels, groups=groups_c,
                                           kernel_size=ker_size,
@@ -698,21 +698,21 @@ def conv_penalty(K : torch.Tensor, en_lambda = None, en_alpha : float = None, fl
     else:
         sl1 = 0
 
-    if(fl_lambda_t is not None and fl_lambda_t > 0):
+    if(fl_lambda_t is not None and fl_lambda_t > 0  and K.shape[-1] > 1):
         D = torch.diff(K,dim=-1)
         D = torch.abs(D)
         st = torch.mean(D) * fl_lambda_t
     else:
         st = 0
 
-    if(fl_lambda_y is not None and fl_lambda_y > 0):
+    if(fl_lambda_y is not None and fl_lambda_y > 0 and K.shape[-2] > 1):
         D = torch.diff(K,dim=-2)
         D = torch.abs(D)
         sy = torch.mean(D) * fl_lambda_y
     else:
         sy = 0
 
-    if(fl_lambda_x is not None and fl_lambda_x > 0):
+    if(fl_lambda_x is not None and fl_lambda_x > 0 and K.shape[-3] > 1):
         D = torch.diff(K,dim=-3)
         D = torch.abs(D)
         sx = torch.mean(D) * fl_lambda_x

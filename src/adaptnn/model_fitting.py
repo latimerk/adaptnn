@@ -81,6 +81,8 @@ class NiruDataModel:
 
                 running_loss += loss.item()
                 
+            if(torch.isnan(running_loss) or torch.isinf(running_loss)):
+                raise RuntimeError(f"Loss function returning invalid results: {running_loss}")
             if((epoch+1) % print_every == 0):
                 print(f"epoch {epoch+1}, loss {running_loss}, step size {optimizer.param_groups[0]['lr']}")
 
@@ -167,5 +169,7 @@ class MCJN05DataModel:
 
                 running_loss += loss.item()
                 
+            if(torch.isnan(running_loss) or torch.isinf(running_loss)):
+                raise RuntimeError(f"Loss function returning invalid results: {running_loss}")
             if((epoch+1) % print_every == 0):
                 print(f"epoch {epoch+1}, loss {running_loss}, step size {optimizer.param_groups[0]['lr']}")
