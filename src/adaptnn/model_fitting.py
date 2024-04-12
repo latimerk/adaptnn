@@ -124,8 +124,8 @@ class MCJN05DataModel:
     def train(self,
               epochs : int,
               optimizer_params = {"lr" : 1e-4},
-              scheduler_params = {"start_factor" : 1.0, "end_factor" : 0.1, "total_iters" : 2000},
-              batch_params = {"batch_size":16, "shuffle":True},
+              scheduler_params = None,#{"start_factor" : 1.0, "end_factor" : 0.1, "total_iters" : 2000},
+              batch_params = {"batch_size":64, "shuffle":True},
               penalty_params = {},
               loss_params = {},
               print_every=10):

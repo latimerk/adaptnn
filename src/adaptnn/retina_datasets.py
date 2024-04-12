@@ -154,8 +154,8 @@ class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
                  train_long_contrast_levels : int | tuple[int] = (1,3),
                  test_long_contrast_levels  : int | tuple[int] = (1,2,3),
                  test_rpt_contrast_levels   : int | tuple[int] = (1,2,3),
-                 train_long_period : tuple[int,int] = (1000,61000),
-                 test_long_period : tuple[int,int]  = (65000,90000),
+                 train_long_period : tuple[int,int] = (1000,71000),
+                 test_long_period : tuple[int,int]  = (75000,95000),
                  segment_length_bins : int = 100,
                  disjoint_segments : bool = True,
                  device = None,
@@ -206,12 +206,15 @@ class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
 
         X_rpt = None
         Y_rpt = None
+        self.rpt_contrast_index = {}
         for ci, contrast in enumerate(self.test_rpt_contrast_levels):
+            self.rpt_contrast_index[contrast] = ci
+
             X_c, Y_c = self._load_rpt_recording(contrast)
             if(Y_rpt is None):
-                Y_rpt = np.zeros((len(self.long_contrasts),) + Y_c.shape)
+                Y_rpt = np.zeros((len(self.test_rpt_contrast_levels),) + Y_c.shape)
             if(X_rpt  is None):
-                X_rpt = np.zeros((len(self.long_contrasts),) + X_c.shape)
+                X_rpt = np.zeros((len(self.test_rpt_contrast_levels),) + X_c.shape)
             X_rpt[ci,...] = X_c
             Y_rpt[ci,...] = Y_c
         self.X_rpt_0 = torch.tensor(X_rpt, device=device, dtype=dtype)
@@ -376,7 +379,7 @@ class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
         Returns:
             tuple (test input,test output) of sizes (1,T+time_padding_bins),(n_rpts,num_cells,T)
         '''
-        ci = self.long_contrast_index[contrast] 
+        ci = self.rpt_contrast_index[contrast] 
         return self.X_rpt[ci,...], self.Y_rpt[ci,...]
     
 
