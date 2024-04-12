@@ -303,12 +303,12 @@ class PopulationFullFieldNet(torch.nn.Sequential):
     def __init__(self, num_cells : int,
                        in_channels : int = 1,
                        layer_channels : int | Tuple[int] = (8,8),
-                       layer_time_lengths : int | Tuple[int] = (100,40),
+                       layer_time_lengths : int | Tuple[int] = (40,12),
                        layer_groups : int | Tuple[int] = 1,
                        layer_bias : bool | Tuple[bool] = True,
                        layer_nonlinearity : bool | Tuple[bool] = True,
                        hidden_activation : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus,
-                       out_activation    : Optional[Callable[..., torch.nn.Module]] = None, #torch.nn.Softplus,
+                       out_activation    : Optional[Callable[..., torch.nn.Module]] = torch.nn.Softplus, #None, torch.nn.Softplus,
                        out_bias : bool = True,
                        device=None, dtype=None, verbose : bool = True):
         '''
@@ -380,6 +380,9 @@ class PopulationFullFieldNet(torch.nn.Sequential):
         if(not out_activation is None):
             if(verbose): print(f"Adding output nonlinearity: {out_activation.__name__}.")
             layers.append(out_activation())
+            self.nonlinear_output = True
+        else:
+            self.nonlinear_output = False
         
         super().__init__(*layers)
 
@@ -413,7 +416,7 @@ class PopulationConvNet(torch.nn.Sequential):
                        in_channels : int = 1,
                        in_time : int = 1,
                        layer_channels : int | Tuple[int] = (8,8),
-                       layer_time_lengths : int | Tuple[int] = (100,40),
+                       layer_time_lengths : int | Tuple[int] = (40,12),
                        layer_spatio_temporal_rank : int | List[int|Tuple] = 2,
                        layer_spatio_temporal_factorization_type : str | Tuple[str] = 'spatial',
 

@@ -19,7 +19,7 @@ class NiruDataset(torch.utils.data.Dataset):
     Breaks the training data up into segments of a given length for fitting with batches.
     '''
     def __init__(self, 
-                 time_padding_bins : int,
+                 time_padding_bins : int = 50,
                  segment_length_bins : int = 100,
                  disjoint_segments : bool = True,
                  recording : str ="A-natural",
@@ -38,6 +38,8 @@ class NiruDataset(torch.utils.data.Dataset):
             fname ="15-11-21b/whitenoise.h5"
         else:
             raise ValueError("Unknown dataset")
+
+        self.time_padding_bins_ = None
 
         f = h5py.File(data_root + fname,"r")
         self.data_file = data_root + fname
@@ -84,18 +86,21 @@ class NiruDataset(torch.utils.data.Dataset):
         '''
         Sets how many time points are needed in an input preceding the output (this is time series data)
         '''
+        if(self.time_padding_bins == time_padding_bins_):
+            return
+        
         self.time_padding_bins_ = time_padding_bins_
         self.X_time = time_padding_bins_ + self.segment_length_bins
 
         if(self.disjoint_segments == 'full'):
             # completely disconnects segments: otherwise time padding period can be the end of another segment
-            self.start_idx_X_train = torch.range(self.X_time, self.X_train.shape[-1]-self.X_time, self.X_time)
+            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
         elif(self.disjoint_segments):
-            self.start_idx_X_train = torch.range(self.X_time, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
+            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
         else:
-            self.start_idx_X_train = torch.range(self.X_time, self.X_train.shape[-1]-self.X_time)
+            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
 
     def transform_X(self, xx : torch.Tensor) -> None:
@@ -140,23 +145,24 @@ class NiruDataset(torch.utils.data.Dataset):
     
 
 
-class MultiContrastFullFieldJN05Dataset():
+class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
     '''
     Currently only bins spikes at the frame length level - no upsampling stimulus yet.
     '''
     def __init__(self,
-                 time_padding_bins : int,
+                 time_padding_bins : int = 50,
                  train_long_contrast_levels : int | tuple[int] = (1,3),
                  test_long_contrast_levels  : int | tuple[int] = (1,2,3),
                  test_rpt_contrast_levels   : int | tuple[int] = (1,2,3),
-                 train_long_period : tuple[int,int] = (1000,50000),
-                 test_long_period : tuple[int,int]  = (55000,90000),
+                 train_long_period : tuple[int,int] = (1000,61000),
+                 test_long_period : tuple[int,int]  = (65000,90000),
                  segment_length_bins : int = 100,
                  disjoint_segments : bool = True,
                  device = None,
                  dtype = None,
                  base_dir : str = "/media/latimerk/ExtraDrive1/cbem/Data/JN05/flashesRGC_JN05/"):
         self.base_dir = base_dir 
+        self.time_padding_bins_ = None
 
         self.frame_length = 0.00834072 # in s
         with open(f"{self._full_dir(0)}/framelen") as f:
@@ -169,7 +175,7 @@ class MultiContrastFullFieldJN05Dataset():
         assert self.train_long_period[1]>self.train_long_period[0], "train_long_period[1] must be greater than train_long_period[0]"
         assert len(self.train_long_contrast_levels)>=1, "no train_long_contrast_levels given."
 
-        test_rpt_contrast_levels = tuple_convert(test_rpt_contrast_levels)
+        self.test_rpt_contrast_levels = tuple_convert(test_rpt_contrast_levels)
         if(test_long_contrast_levels is not None):
             test_long_contrast_levels = tuple_convert(test_long_contrast_levels)
         if(test_long_period is not None):
@@ -204,8 +210,8 @@ class MultiContrastFullFieldJN05Dataset():
             X_c, Y_c = self._load_rpt_recording(contrast)
             if(Y_rpt is None):
                 Y_rpt = np.zeros((len(self.long_contrasts),) + Y_c.shape)
-            if(self.X_rpt_0  is None):
-                self.X_rpt_0 = np.zeros((len(self.long_contrasts),) + X_c.shape)
+            if(X_rpt  is None):
+                X_rpt = np.zeros((len(self.long_contrasts),) + X_c.shape)
             X_rpt[ci,...] = X_c
             Y_rpt[ci,...] = Y_c
         self.X_rpt_0 = torch.tensor(X_rpt, device=device, dtype=dtype)
@@ -222,6 +228,17 @@ class MultiContrastFullFieldJN05Dataset():
 
         self.time_padding_bins = time_padding_bins
 
+    def _get_num_repeats(self):
+        num_rpts = None
+        for contrast in self.test_rpt_contrast_levels:
+            fname_rpt_spks = f"{self._full_dir(contrast)}/Mtsp_rpt.mat"
+            f_spks = loadmat(fname_rpt_spks)
+            mtsp = f_spks["Mtsp_rpt"].ravel()
+            num_rpts_c = min([cc.shape[1] for cc in mtsp])
+            if(num_rpts is None or num_rpts_c < num_rpts):
+                num_rpts = num_rpts_c
+        return num_rpts
+
 
     def _load_rpt_recording(self, contrast : int) -> tuple[np.ndarray,np.ndarray] :
         fname_rpt_stim = f"{self._full_dir(contrast)}/Stim_rpt.mat"
@@ -235,13 +252,13 @@ class MultiContrastFullFieldJN05Dataset():
 
         T = stim.size;
         num_cells = mtsp.size
-        num_rpts = mtsp[0].shape[1]
+        num_rpts = self._get_num_repeats()
 
         Y = np.zeros((num_rpts,num_cells,T),dtype=int)
         for cell_num,spks in enumerate(mtsp):
             for rpt in range(num_rpts):
                 spks = mtsp[cell_num][:,rpt] - 1
-                Y[rpt,cell_num,:],_ = np.histogram(spks-1, bins=np.arange(0,T))
+                Y[rpt,cell_num,:],_ = np.histogram(spks-1, bins=np.arange(0,T+1))
 
         return stim, Y
 
@@ -261,7 +278,7 @@ class MultiContrastFullFieldJN05Dataset():
 
         for cell_num,spks in enumerate(mtsp):
             spks = mtsp[cell_num] - 1
-            Y[cell_num,:],_ = np.histogram(spks-1, bins=np.arange(0,T))
+            Y[cell_num,:],_ = np.histogram(spks-1, bins=np.arange(0,T+1))
 
         return stim, Y
 
@@ -299,6 +316,8 @@ class MultiContrastFullFieldJN05Dataset():
         Sets how many time points are needed in an input preceding the output (this is time series data).
         This also loads the data segments to the device
         '''
+        if(self.time_padding_bins == time_padding_bins_):
+            return
 
         self.time_padding_bins_ = time_padding_bins_
         self.X_time = time_padding_bins_ + self.segment_length_bins
@@ -308,36 +327,37 @@ class MultiContrastFullFieldJN05Dataset():
         x_start_train = self.train_long_period[0] - time_padding_bins_
         self.X_train = torch.tensor(self.X_full[ci_train, x_start_train:self.train_long_period[1]],
                                     device=self.device, dtype=self.dtype).unsqueeze(1)
-        self.Y_train = torch.tensor(self.Y_full[ci_train, self.train_long_period[0]:self.train_long_period[1]],
+        self.Y_train = torch.tensor(self.Y_full[ci_train, :,self.train_long_period[0]:self.train_long_period[1]],
                                     device=self.device)
 
         if(self.disjoint_segments == 'full'):
             # completely disconnects segments: otherwise time padding period can be the end of another segment
-            self.start_idx_X_train = torch.range(self.X_time, self.X_train.shape[-1]-self.X_time, self.X_time)
-            self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
+            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.X_time)
+            self.start_idx_Y_train = self.start_idx_X_train 
         elif(self.disjoint_segments):
-            self.start_idx_X_train = torch.range(self.X_time, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
-            self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
+            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
+            self.start_idx_Y_train = self.start_idx_X_train 
         else:
-            self.start_idx_X_train = torch.range(self.X_time, self.X_train.shape[-1]-self.X_time)
-            self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
+            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time)
+            self.start_idx_Y_train = self.start_idx_X_train
 
         if(self.test_long):
             ci_test = [self.long_contrast_index[xx] for xx in self.test_long_contrast_levels]
             x_start_test= self.train_long_period[0] - time_padding_bins_
             self.X_test = torch.tensor(self.X_full[ci_test, x_start_test:self.test_long_period[1]],
                                         device=self.device, dtype=self.dtype).unsqueeze(1)
-            self.Y_test = torch.tensor(self.Y_full[ci_test, self.test_long_period[0]:self.test_long_period[1]],
+            self.Y_test = torch.tensor(self.Y_full[ci_test, :, self.test_long_period[0]:self.test_long_period[1]],
                                         device=self.device)
             
 
         
-        shape_rpt_padding = self.X_rpt_0.shape
+        shape_rpt_padding = list(self.X_rpt_0.shape)
         shape_rpt_padding[1] = time_padding_bins_
-        self.X_rpt = torch.concat([self.X_rpt_0,
-                                   torch.zeros(shape_rpt_padding,
+        self.X_rpt = torch.concat([torch.zeros(shape_rpt_padding,
                                                 device=self.X_rpt_0.device,
-                                                dtype=self.X_rpt_0.dtype)], 
+                                                dtype=self.X_rpt_0.dtype),
+                                    self.X_rpt_0
+                                   ], 
                                    dim=1).unsqueeze(1)
         
     
@@ -358,3 +378,8 @@ class MultiContrastFullFieldJN05Dataset():
         '''
         ci = self.long_contrast_index[contrast] 
         return self.X_rpt[ci,...], self.Y_rpt[ci,...]
+    
+
+    @property
+    def num_cells(self) -> int:
+        return self.Y_full.shape[1]
