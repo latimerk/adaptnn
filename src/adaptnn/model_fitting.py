@@ -1,6 +1,7 @@
 from adaptnn.retina_datasets import NiruDataset, MultiContrastFullFieldJN05Dataset
 from adaptnn.visual_neuron_convnets import PopulationConvNet, PopulationFullFieldNet, penalize_convnet_weights
 import torch
+import numpy as np
 
 class NiruDataModel:
     def __init__(self, dataset_params = {"recording" : "A-noise", "dtype" : torch.float32},
@@ -81,7 +82,7 @@ class NiruDataModel:
 
                 running_loss += loss.item()
                 
-            if(torch.isnan(running_loss) or torch.isinf(running_loss)):
+            if(np.isnan(running_loss) or np.isinf(running_loss)):
                 raise RuntimeError(f"Loss function returning invalid results: {running_loss}")
             if((epoch+1) % print_every == 0):
                 print(f"epoch {epoch+1}, loss {running_loss}, step size {optimizer.param_groups[0]['lr']}")
@@ -127,7 +128,7 @@ class MCJN05DataModel:
               epochs : int,
               optimizer_params = {"lr" : 1e-4},
               scheduler_params = None,#{"start_factor" : 1.0, "end_factor" : 0.1, "total_iters" : 2000},
-              batch_params = {"batch_size":64, "shuffle":True},
+              batch_params = {"batch_size":8, "shuffle":True},
               penalty_params = {},
               loss_params = {},
               print_every=10):
@@ -169,7 +170,7 @@ class MCJN05DataModel:
 
                 running_loss += loss.item()
                 
-            if(torch.isnan(running_loss) or torch.isinf(running_loss)):
+            if(np.isnan(running_loss) or np.isinf(running_loss)):
                 raise RuntimeError(f"Loss function returning invalid results: {running_loss}")
             if((epoch+1) % print_every == 0):
                 print(f"epoch {epoch+1}, loss {running_loss}, step size {optimizer.param_groups[0]['lr']}")

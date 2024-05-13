@@ -30,6 +30,7 @@ class NiruDataset(torch.utils.data.Dataset):
                  data_root : str = "data/ganglion_cell_data/",
                  normalize_stimulus : bool = True
                 ):
+        pt = 0
         if(recording == "A-natural"):
             fname ="15-11-21a/naturalscene.h5"
         elif(recording == "A-noise"):
@@ -41,21 +42,32 @@ class NiruDataset(torch.utils.data.Dataset):
 
         self.time_padding_bins_ = None
 
-        f = h5py.File(data_root + fname,"r")
         self.data_file = data_root + fname
+        f = h5py.File(self.data_file,"r")
 
-        self.X_train = torch.tensor(f["train"]["stimulus"], device=device, dtype=dtype)
-        self.X_train = self.X_train.transpose(0,2)
-        self.X_train = self.X_train.transpose(2,1)
-        self.X_test = torch.tensor(f["test"]["stimulus"], device=device, dtype=dtype)
-        self.X_test = self.X_test.transpose(0,2)
-        self.X_test = self.X_test.transpose(2,1)
 
-        self.Y_train = torch.tensor(f["train"]["response"][response_type_train], device=device, dtype=dtype)
-        self.Y_test = torch.tensor(f["test"]["response"][response_type_test], device=device, dtype=dtype)
+
+        X_train_local = np.array(f["train"]["stimulus"])
+        X_test_local  = np.array(f["test"]["stimulus"])
+        Y_train_local = np.array(f["train"]["response"][response_type_train])
+        Y_test_local  = np.array(f["test"]["response"][response_type_test])
+
+        
+
+
+        self.X_train = torch.tensor(X_train_local, device=device, dtype=dtype)
+
+        self.X_train = self.X_train.moveaxis(0,2)
+
+
+        self.X_test = torch.tensor(X_test_local,  device=device, dtype=dtype)
+        self.X_test = self.X_test.moveaxis(0,2)
+
+        self.Y_train = torch.tensor(Y_train_local, device=device, dtype=dtype)
+        self.Y_test = torch.tensor(Y_test_local, device=device, dtype=dtype)
 
         self.X_sig, self.X_mu = torch.std_mean(self.X_train,dim=-1,keepdim=True)
-
+       
         self.normalize_stimulus = normalize_stimulus
         if(normalize_stimulus):
             self.X_train = self.transform_X(self.X_train)
@@ -129,9 +141,9 @@ class NiruDataset(torch.utils.data.Dataset):
     def get_test(self) -> tuple[torch.Tensor, torch.Tensor]:
         '''
         Returns:
-            tuple (test input,test output) of sizes (1,X,Y,T+time_padding_bins),(num_cells,T)
+            tuple (test input,test output) of sizes (1,1,X,Y,T+time_padding_bins),(1,num_cells,T)
         '''
-        return self.X_test.unsqueeze(0), self.Y_test[:,self.time_padding_bins:]
+        return self.X_test.unsqueeze(0).unsqueeze(0), self.Y_test[:,self.time_padding_bins:].unsqueeze(0)
     
     @property
     def frame_width(self) -> int:
@@ -156,7 +168,7 @@ class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
                  test_rpt_contrast_levels   : int | tuple[int] = (1,2,3),
                  train_long_period : tuple[int,int] = (1000,71000),
                  test_long_period : tuple[int,int]  = (75000,95000),
-                 segment_length_bins : int = 100,
+                 segment_length_bins : int = 240,
                  disjoint_segments : bool = True,
                  device = None,
                  dtype = None,

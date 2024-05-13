@@ -48,10 +48,11 @@ class TransposeLinear(torch.nn.Module):
         self.linear = torch.nn.Linear(self.in_features_total, out_features, **kwargs)
 
 
-    def forward(self, X):
+    def forward(self, X : torch.Tensor):
         if(self.n_in_features > 1):
             # for flattening results of a Conv3D conv into the right fully connected layer
-            X = torch.nn.Flatten(start_dim=-1-self.n_in_features, end_dim=-2);
+            # X = torch.nn.Flatten(start_dim=-1-self.n_in_features, end_dim=-2);
+            X = X.view(X.shape[0], self.in_features_total, X.shape[-1])
         
         # flips dimensions
         X = torch.transpose(X, dim0=-2, dim1=-1)
@@ -248,21 +249,23 @@ class BatchNorm3DSpace(torch.nn.BatchNorm2d):
     '''
     BatchNorm2D for inputs of size (N,C,X,Y,T) where we want to normalize over each X,Y but not T.
 
-    Forward simply rearranged input to be (N,C*T,X,Y), calls torch.nn.BatchNorm2D, and then rearranges things back.
+    Forward simply rearranged input to be (N*T,C,X,Y), calls torch.nn.BatchNorm2D, and then rearranges things back.
     Besides the size time_bins (T), the options are passed to the torch.nn.BatchNorm2D constructor.
     '''
-    def __init__(self, in_channels : int, time_bins : int, **kwargs):
-        super().__init__(in_channels*time_bins, **kwargs)
+    def __init__(self, in_channels : int,  **kwargs):
+        super().__init__(in_channels, **kwargs)
 
     def forward(self, X):
-        X = torch.movedim(X,4,2)
+
+        X = torch.movedim(X,-1,-4)
         shape_0 = X.shape
+
         X = X.view(-1, self.num_features, X.shape[-2], X.shape[-1])
 
         X = torch.nn.BatchNorm2d.forward(self,X)
 
         X = X.view(shape_0)
-        X = torch.movedim(X,2,4)
+        X = torch.movedim(X,-4,-1)
 
         return X
 
@@ -271,21 +274,21 @@ class InstanceNorm3DSpace(torch.nn.InstanceNorm2d):
     '''
     InstanceNorm2d for inputs of size (N,C,X,Y,T) where we want to normalize over each X,Y but not T.
 
-    Forward simply rearranged input to be (N,C*T,X,Y), calls torch.nn.InstanceNorm2d, and then rearranges things back.
+    Forward simply rearranged input to be (N*T,C,X,Y), calls torch.nn.InstanceNorm2d, and then rearranges things back.
     Besides the size time_bins (T), the options are passed to the torch.nn.InstanceNorm2d constructor.
     '''
-    def __init__(self, in_channels : int, time_bins : int, **kwargs):
-        super().__init__(in_channels*time_bins, **kwargs)
+    def __init__(self, in_channels : int,  **kwargs):
+        super().__init__(in_channels, **kwargs)
 
     def forward(self, X):
-        X = torch.movedim(X,4,2)
+        X = torch.movedim(X,-1,-4)
         shape_0 = X.shape
         X = X.view(-1, self.num_features, X.shape[-2], X.shape[-1])
 
         X = torch.nn.InstanceNorm2d.forward(self,X)
 
         X = X.view(shape_0)
-        X = torch.movedim(X,2,4)
+        X = torch.movedim(X,-4,-1)
 
         return X
 
@@ -414,7 +417,6 @@ class PopulationConvNet(torch.nn.Sequential):
                        frame_width : int ,
                        frame_height : int,
                        in_channels : int = 1,
-                       in_time : int = 1,
                        layer_channels : int | Tuple[int] = (8,8),
                        layer_time_lengths : int | Tuple[int] = (40,12),
                        layer_spatio_temporal_rank : int | List[int|Tuple] = 2,
@@ -422,9 +424,9 @@ class PopulationConvNet(torch.nn.Sequential):
 
                        layer_rf_pixel_widths : int | Tuple[int] = (15,15),
                        layer_rf_pixel_heights : int | Tuple[int] = None,
-                       layer_rf_dilations_x : int | Tuple[int] = None,
+                       layer_rf_dilations_x : int | Tuple[int] = 1,
                        layer_rf_dilations_y : int | Tuple[int] = None,
-                       layer_rf_strides_x : int | Tuple[int] = None,
+                       layer_rf_strides_x : int | Tuple[int] = 1,
                        layer_rf_strides_y : int | Tuple[int] = None,
                        layer_groups : int | Tuple[int] = 1,
                        layer_bias : bool | Tuple[bool] = True,
@@ -436,7 +438,7 @@ class PopulationConvNet(torch.nn.Sequential):
                        out_normalization : bool | str = True,
                        device=None, dtype=None, verbose : bool = True,
                        normalization_options ={"affine" : False,
-                                               "track_running_state" : False}
+                                               "track_running_stats" : False}
                     ):
         '''
         Builds a sequential model as a series of spatiotemporal convolution (3-D) layers, followed by a fully connected linear layer for the output.
@@ -446,7 +448,6 @@ class PopulationConvNet(torch.nn.Sequential):
             frame_width : the width of the input video
             frame_height : the height of the input video
             in_channels : (C) the number of input channels
-            in_time : (T) the number of time bins per input. Only needed for normalization layers when normalization_options affine=True or track_running_state=True
             The following are lists for each convolution layer (or a constant if the same for each layer, except for layer_channels)
                 layer_channels : the number of output channels. 
                                  IMPORTANT: The length of this parameter controls the number of layers. If it is a constant, only 1 layer will be created
@@ -491,7 +492,7 @@ class PopulationConvNet(torch.nn.Sequential):
         layer_rf_pixel_heights = tuple_convert(layer_rf_pixel_heights, n_layers, layer_rf_pixel_widths)
 
         layer_rf_dilations_x = tuple_convert(layer_rf_dilations_x, n_layers)
-        layer_rf_dilations_y = tuple_convert(layer_rf_dilations_y, n_layers, layer_rf_dilations_y)
+        layer_rf_dilations_y = tuple_convert(layer_rf_dilations_y, n_layers, layer_rf_dilations_x)
         layer_rf_strides_x = tuple_convert(layer_rf_strides_x, n_layers)
         layer_rf_strides_y = tuple_convert(layer_rf_strides_y, n_layers, layer_rf_strides_x)
 
@@ -549,7 +550,7 @@ class PopulationConvNet(torch.nn.Sequential):
                     layer_groups,
                     layer_nonlinearity,
                     layer_normalization,
-                    bias_c):
+                    layer_bias):
             
 
             padding_x = 0;
@@ -559,14 +560,13 @@ class PopulationConvNet(torch.nn.Sequential):
             kernel_size = (ker_width, ker_height, ker_time)
 
             
-            input_time_bins_c = max(1,input_time_bins_c - total_time_padding)
 
             if(normalization_c == True):
                 if(verbose): print(f"Adding 2D batch normalization layer.")
-                layers.append(BatchNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+                layers.append(BatchNorm3DSpace(in_channels=in_channels,  **normalization_options))
             elif(normalization_c == 'instance'):
                 if(verbose): print(f"Adding 2D instance normalization layer.")
-                layers.append(InstanceNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+                layers.append(InstanceNorm3DSpace(in_channels=in_channels,  **normalization_options))
             elif(normalization_c == '3D'):
                 if(verbose): print(f"Adding 3D batch normalization layer.")
                 layers.append(torch.nn.BatchNorm3d(in_channels=in_channels, **normalization_options))
@@ -609,14 +609,13 @@ class PopulationConvNet(torch.nn.Sequential):
 
         # output layer: fully connected
         
-        input_time_bins_c = max(1,input_time_bins_c - total_time_padding)
 
         if(out_normalization == True):
             if(verbose): print(f"Adding final 2D batch normalization layer.")
-            layers.append(BatchNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+            layers.append(BatchNorm3DSpace(in_channels=in_channels, **normalization_options))
         elif(out_normalization == 'instance'):
             if(verbose): print(f"Adding final 2D instance normalization layer.")
-            layers.append(InstanceNorm3DSpace(in_channels=in_channels, time_bins=input_time_bins_c, **normalization_options))
+            layers.append(InstanceNorm3DSpace(in_channels=in_channels, **normalization_options))
         elif(out_normalization == '3D'):
             if(verbose): print(f"Adding final 3D batch normalization layer.")
             layers.append(torch.nn.BatchNorm3d(in_channels=in_channels, **normalization_options))
