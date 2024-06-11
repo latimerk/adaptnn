@@ -5,88 +5,39 @@ import torch
 
 from adaptnn.utils import  tuple_convert
 
-class NiruDataset(torch.utils.data.Dataset):
-    '''
-    Loads up one dataset from
 
-    Maheswaranathan, Niru, Lane T. McIntosh, Hidenori Tanaka, Satchel Grant, David B. Kastner,
-    Joshua B. Melander, Aran Nayebi et al. "Interpreting the retinal neural code for natural scenes:
-    From computations to neurons." Neuron 111, no. 17 (2023): 2742-2755.
-
-
-    The data can be downloaded from the link given in the paper.
-
-    Breaks the training data up into segments of a given length for fitting with batches.
-    '''
-    def __init__(self, 
-                 time_padding_bins : int = 50,
-                 segment_length_bins : int = 100,
-                 disjoint_segments : bool = True,
-                 recording : str ="A-natural",
-                 response_type_train : str = "binned",
-                 response_type_test : str = "firing_rate_10ms",
-                 device = None,
-                 dtype = None,
-                 data_root : str = "data/ganglion_cell_data/",
-                 normalize_stimulus : bool = True
+class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
+    def __init__(self,
+                 X_train : torch.Tensor, # (X,Y,T)
+                 X_test  : torch.Tensor, # (N,T)
+                 Y_train : torch.Tensor,
+                 Y_test  : torch.Tensor,
+                 normalize_stimulus : bool,
+                 time_padding_bins : int,
+                 segment_length_bins : int,
+                 disjoint_segments : bool
                 ):
-        pt = 0
-        if(recording == "A-natural"):
-            fname ="15-11-21a/naturalscene.h5"
-        elif(recording == "A-noise"):
-            fname ="15-11-21a/whitenoise.h5"
-        elif(recording == "B-noise"):
-            fname ="15-11-21b/whitenoise.h5"
-        else:
-            raise ValueError("Unknown dataset")
+        self.time_padding_bins_ = time_padding_bins
+        self.segment_length_bins = segment_length_bins
 
-        self.time_padding_bins_ = None
-
-        self.data_file = data_root + fname
-        f = h5py.File(self.data_file,"r")
-
-
-
-        X_train_local = np.array(f["train"]["stimulus"])
-        X_test_local  = np.array(f["test"]["stimulus"])
-        Y_train_local = np.array(f["train"]["response"][response_type_train])
-        Y_test_local  = np.array(f["test"]["response"][response_type_test])
-
-        
-
-
-        self.X_train = torch.tensor(X_train_local, device=device, dtype=dtype)
-
-        self.X_train = self.X_train.moveaxis(0,2)
-
-
-        self.X_test = torch.tensor(X_test_local,  device=device, dtype=dtype)
-        self.X_test = self.X_test.moveaxis(0,2)
-
-        self.Y_train = torch.tensor(Y_train_local, device=device, dtype=dtype)
-        self.Y_test = torch.tensor(Y_test_local, device=device, dtype=dtype)
-
-        self.X_sig, self.X_mu = torch.std_mean(self.X_train,dim=-1,keepdim=True)
+        self.X_sig, self.X_mu = torch.std_mean(X_train,dim=-1,keepdim=True)
        
         self.normalize_stimulus = normalize_stimulus
         if(normalize_stimulus):
-            self.X_train = self.transform_X(self.X_train)
-            self.X_test = self.transform_X(self.X_test)
+            X_train = self.transform_X(X_train)
+            X_test = self.transform_X(X_test)
+
+        self.X_train = X_train
+        self.X_test = X_test
+        self.Y_train = Y_train
+        self.Y_test = Y_test
         
+
         self.disjoint_segments = disjoint_segments
-        self.recording = recording
-        self.response_type_train = response_type_train
-        self.response_type_test = response_type_test
-
-        
-        self.segment_length_bins = segment_length_bins
-
         self.X_time = time_padding_bins + self.segment_length_bins
         self.start_idx_X_train = np.array([0])
         self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins
-
-        self.time_padding_bins = time_padding_bins
-
+       
     @property
     def time_padding_bins(self) -> int:
         if(self.time_padding_bins_ is None):
@@ -115,15 +66,6 @@ class NiruDataset(torch.utils.data.Dataset):
             self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
 
-    def transform_X(self, xx : torch.Tensor) -> None:
-        '''
-        Normalizes a video input (...,X,Y,T) pixelwise given the fitted X_sig and X_mu parameters.
-        '''
-        if(not self.normalize_stimulus):
-            return xx
-        else:
-            return (xx - self.X_mu)/self.X_sig 
-
     def __len__(self) -> int:
         return len(self.start_idx_X_train)
     
@@ -136,7 +78,7 @@ class NiruDataset(torch.utils.data.Dataset):
 
         start_y = self.start_idx_Y_train[idx]
         end_y   = start_y + self.segment_length_bins
-        return self.X_train[:,:,start_x:end_x].unsqueeze(0), self.Y_train[:,start_y:end_y]
+        return self.X_train[...,start_x:end_x].unsqueeze(0), self.Y_train[:,start_y:end_y]
     
     def get_test(self) -> tuple[torch.Tensor, torch.Tensor]:
         '''
@@ -146,15 +88,101 @@ class NiruDataset(torch.utils.data.Dataset):
         return self.X_test.unsqueeze(0).unsqueeze(0), self.Y_test[:,self.time_padding_bins:].unsqueeze(0)
     
     @property
+    def temporal_only(self) -> bool:
+        return self.X_train.ndim != 3
+
+    @property
     def frame_width(self) -> int:
-        return self.X_train.shape[0]
+        if(self.X_train.ndim == 3):
+            return self.X_train.shape[0]
+        else:
+            return None
+        
     @property
     def frame_height(self) -> int:
-        return self.X_train.shape[1]
+        if(self.X_train.ndim == 3):
+            return self.X_train.shape[1]
+        else:
+            return None
+    
+    def transform_X(self, xx : torch.Tensor) -> None:
+        '''
+        Normalizes a video input (...,X,Y,T) pixelwise given the fitted X_sig and X_mu parameters.
+        '''
+        if(not self.normalize_stimulus):
+            return xx
+        else:
+            return (xx - self.X_mu)/self.X_sig 
+     
     @property
     def num_cells(self) -> int:
         return self.Y_train.shape[0]
-    
+
+
+class NiruDataset(SpatioTemporalDatasetBase):
+    '''
+    Loads up one dataset from
+
+    Maheswaranathan, Niru, Lane T. McIntosh, Hidenori Tanaka, Satchel Grant, David B. Kastner,
+    Joshua B. Melander, Aran Nayebi et al. "Interpreting the retinal neural code for natural scenes:
+    From computations to neurons." Neuron 111, no. 17 (2023): 2742-2755.
+
+
+    The data can be downloaded from the link given in the paper.
+
+    Breaks the training data up into segments of a given length for fitting with batches.
+    '''
+    def __init__(self, 
+                 time_padding_bins : int = 50,
+                 segment_length_bins : int = 100,
+                 disjoint_segments : bool = True,
+                 recording : str ="A-natural",
+                 response_type_train : str = "binned",
+                 response_type_test : str = "firing_rate_10ms",
+                 device = None,
+                 dtype = None,
+                 data_root : str = "data/ganglion_cell_data/",
+                 normalize_stimulus : bool = True
+                ):
+        if(recording == "A-natural"):
+            fname ="15-11-21a/naturalscene.h5"
+        elif(recording == "A-noise"):
+            fname ="15-11-21a/whitenoise.h5"
+        elif(recording == "B-noise"):
+            fname ="15-11-21b/whitenoise.h5"
+        else:
+            raise ValueError("Unknown dataset")
+
+
+        self.data_file = data_root + fname
+        f = h5py.File(self.data_file,"r")
+
+        X_train_local = np.array(f["train"]["stimulus"])
+        X_test_local  = np.array(f["test"]["stimulus"])
+        Y_train_local = np.array(f["train"]["response"][response_type_train])
+        Y_test_local  = np.array(f["test"]["response"][response_type_test])
+
+        X_train = torch.tensor(X_train_local, device=device, dtype=dtype)
+        X_train = X_train.moveaxis(0,2)
+        X_test  = torch.tensor(X_test_local,  device=device, dtype=dtype)
+        X_test  = X_test.moveaxis(0,2)
+        Y_train = torch.tensor(Y_train_local, device=device, dtype=dtype)
+        Y_test  = torch.tensor(Y_test_local, device=device, dtype=dtype)
+        
+        self.recording = recording
+        self.response_type_train = response_type_train
+        self.response_type_test = response_type_test
+
+        super().__init__(X_train,
+                 X_test,
+                 Y_train,
+                 Y_test,
+                 normalize_stimulus,
+                 time_padding_bins,
+                 segment_length_bins,
+                 disjoint_segments)
+
+
 
 
 class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
@@ -253,7 +281,6 @@ class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
             if(num_rpts is None or num_rpts_c < num_rpts):
                 num_rpts = num_rpts_c
         return num_rpts
-
 
     def _load_rpt_recording(self, contrast : int) -> tuple[np.ndarray,np.ndarray] :
         fname_rpt_stim = f"{self._full_dir(contrast)}/Stim_rpt.mat"

@@ -14,12 +14,19 @@ def compute_conv_output_size(L_in : int, kernel_size : int, stride : int = 1,
     return L_out
 
 def tuple_convert(a, l = 1, target = None):
+
+    
     if(a is None):
         return target
     elif(isinstance(a, list)):
         return tuple(a)
     elif(isinstance(a, tuple)):
-        return a
+        if(len(a) == 1):
+            return a * l
+        elif(len(a) == 0):
+            return target
+        else:
+            return a
     else:
         try:
             if(isinstance(a,npt.ArrayLike)):
