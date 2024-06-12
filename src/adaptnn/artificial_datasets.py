@@ -10,6 +10,7 @@ from tltorch.functional import convolve as tltorch_convolve
 from adaptnn.retina_datasets import SpatioTemporalDatasetBase
 from adaptnn.utils import  tuple_convert
 
+from scipy.linalg import orth
 
 class LinearNonlinear(SpatioTemporalDatasetBase):
     def __init__(self,
@@ -20,8 +21,9 @@ class LinearNonlinear(SpatioTemporalDatasetBase):
                  filter_time: int = 10,
                  filter_spatial : int | tuple[int,int] | None = None, 
                  filter_baseline : float | npt.ArrayLike = 0,
+                 filter_rank : int | None = None,
                  out_activation = torch.nn.Softplus,
-                 out_noise_std_train : float | npt.ArrayLike | None = 1,
+                 out_noise_std_train : float | npt.ArrayLike | None = 0.1,
                  out_noise_std_test  : float | npt.ArrayLike | None = None,
                  
                  segment_length_bins : int = 100,
@@ -46,9 +48,22 @@ class LinearNonlinear(SpatioTemporalDatasetBase):
             else:
                 conv_layer = torch.nn.Conv3d(in_channels=1,out_channels=num_cells,kernel_size=filter_spatial+(filter_time,),device=device, dtype=dtype)
         
+            if(filter_rank is None or filter_rank <= 0 or len(filter_spatial) == 0):
+                std = 1/np.sqrt(np.prod(conv_layer.weight.shape[2:]))
+                torch.nn.init.normal_(conv_layer.weight,std=std )
+            else:
+                self.filter_comp_time = orth(np.random.randn(filter_time,filter_rank))
+                self.filter_comp_space = orth(np.random.randn(filter_spatial[0]*filter_spatial[1],filter_rank))
 
-            std = 1/np.sqrt(np.prod(conv_layer.weight.shape[2:]))
-            torch.nn.init.normal_(conv_layer.weight,std=std )
+                for ii in range(conv_layer.weight.shape[0]):
+                    F = (self.filter_comp_time * np.random.randn(1,filter_rank)) @ self.filter_comp_space.T
+                    F = F.T.reshape(filter_spatial + (filter_time,))
+
+                    F /= np.sqrt(np.sum(F**2))
+
+                    conv_layer.weight[ii,0,:,:,:] = torch.tensor(F,dtype=dtype,device=device)
+                
+
             conv_layer.bias[:] = filter_baseline
 
             if(out_activation is None):

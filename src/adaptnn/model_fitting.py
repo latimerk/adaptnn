@@ -5,9 +5,17 @@ import torch
 import numpy as np
 
 class ArtificialModel:
-    def __init__(self, dataset_params = {"filter_spatial" : (15,15)},
-                       net_params = {"layer_time_lengths" : (10,5),
-                                     "layer_rf_pixel_widths" : (5,5)}):
+    def __init__(self, dataset_params = {"filter_spatial" : (15,15),
+                                         "filter_time" : 10,
+                                         "num_cells" : 4,
+                                         "out_noise_std_train" : None,
+                                         "filter_rank" : 2},
+                       net_params = {"layer_time_lengths" : (10,),
+                                     "layer_rf_pixel_widths" : (15,),
+                                     "layer_channels" : (4,),
+                                     "layer_spatio_temporal_factorization_type" : ('spatial',),
+                                     "out_normalization" : True,
+                                     "layer_normalization" : True}):
 
         self.dataset = LinearNonlinear(**dataset_params)
 
@@ -21,7 +29,7 @@ class ArtificialModel:
                 del(net_params["layer_rf_pixel_widths"] )
         else:
             self.model_class = PopulationConvNet
-            net_params["frame_width"] = self.dataset.frame_width
+            net_params["frame_width"]  = self.dataset.frame_width
             net_params["frame_height"] = self.dataset.frame_height
 
         self.model = self.model_class(num_cells=self.dataset.num_cells,
@@ -31,6 +39,11 @@ class ArtificialModel:
 
 
     def predict(self):
+        '''
+        Returns:
+            Y_test_predicted : Tensor of size (Time,Cells)
+            Y_test_true : Tensor of size (Time,Cells)
+        '''
         with torch.no_grad():
             X_test, Y_test = self.dataset.get_test()
             return self.model(X_test), Y_test
@@ -83,7 +96,7 @@ class ArtificialModel:
                 outputs=self.model(X_t)
                 
                 #calculate loss
-                loss=criterion(outputs, Y_t) + penalty(self.model)
+                loss=criterion(outputs, Y_t)# + penalty(self.model)
                 
                 #getting gradients wrt parameters
                 loss.backward()

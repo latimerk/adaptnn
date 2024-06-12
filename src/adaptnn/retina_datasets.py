@@ -17,7 +17,7 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
                  segment_length_bins : int,
                  disjoint_segments : bool
                 ):
-        self.time_padding_bins_ = time_padding_bins
+        self.time_padding_bins_ = None
         self.segment_length_bins = segment_length_bins
 
         self.X_sig, self.X_mu = torch.std_mean(X_train,dim=-1,keepdim=True)
@@ -37,6 +37,8 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
         self.X_time = time_padding_bins + self.segment_length_bins
         self.start_idx_X_train = np.array([0])
         self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins
+
+        self.time_padding_bins = time_padding_bins
        
     @property
     def time_padding_bins(self) -> int:
@@ -49,7 +51,7 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
         '''
         Sets how many time points are needed in an input preceding the output (this is time series data)
         '''
-        if(self.time_padding_bins == time_padding_bins_):
+        if(self.time_padding_bins_ == time_padding_bins_):
             return
         
         self.time_padding_bins_ = time_padding_bins_
@@ -57,13 +59,13 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
 
         if(self.disjoint_segments == 'full'):
             # completely disconnects segments: otherwise time padding period can be the end of another segment
-            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
         elif(self.disjoint_segments):
-            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
         else:
-            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
 
     def __len__(self) -> int:
@@ -374,13 +376,13 @@ class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
 
         if(self.disjoint_segments == 'full'):
             # completely disconnects segments: otherwise time padding period can be the end of another segment
-            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train 
         elif(self.disjoint_segments):
-            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
             self.start_idx_Y_train = self.start_idx_X_train 
         else:
-            self.start_idx_X_train = torch.arange(self.X_time, self.X_train.shape[-1]-self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train
 
         if(self.test_long):
