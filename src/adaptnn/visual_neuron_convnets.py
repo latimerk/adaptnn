@@ -246,52 +246,8 @@ class SpatioTemporalTuckerRFConv3D(torch.nn.Module):
         msg += f', with full weight size {self.weights_shape} with factorization_type={self.factorization_type} as a {self.weight_tucker.__repr__()}'
         return msg
 
-# class BatchNorm3DSpace(torch.nn.BatchNorm2d):
-#     '''
-#     BatchNorm2D for inputs of size (N,C,X,Y,T) where we want to normalize over each X,Y but not T.
-
-#     Forward simply rearranged input to be (N*T,C,X,Y), calls torch.nn.BatchNorm2D, and then rearranges things back.
-#     Besides the size time_bins (T), the options are passed to the torch.nn.BatchNorm2D constructor.
-#     '''
-#     def __init__(self, in_channels : int,  **kwargs):
-#         super().__init__(in_channels, **kwargs)
-
-#     def forward(self, X):
-
-#         X = torch.movedim(X,-1,-4)
-#         shape_0 = X.shape
-
-#         X = X.view(-1, self.num_features, shape_0[-2], shape_0[-1])
-
-#         X = torch.nn.BatchNorm2d.forward(self,X)
-
-#         X = X.view(shape_0)
-#         X = torch.movedim(X,-4,-1)
-
-#         return X
 
 
-class InstanceNorm3DSpace(torch.nn.InstanceNorm2d):
-    '''
-    InstanceNorm2d for inputs of size (N,C,X,Y,T) where we want to normalize over each X,Y but not T.
-
-    Forward simply rearranged input to be (N*T,C,X,Y), calls torch.nn.InstanceNorm2d, and then rearranges things back.
-    Besides the size time_bins (T), the options are passed to the torch.nn.InstanceNorm2d constructor.
-    '''
-    def __init__(self, in_channels : int,  **kwargs):
-        super().__init__(in_channels, **kwargs)
-
-    def forward(self, X):
-        X = torch.movedim(X,-1,-4)
-        shape_0 = X.shape
-        X = X.view(-1, self.num_features, shape_0[-2], shape_0[-1])
-
-        X = torch.nn.InstanceNorm2d.forward(self,X)
-
-        X = X.view(shape_0)
-        X = torch.movedim(X,-4,-1)
-
-        return X
 
 
 '''
@@ -463,16 +419,14 @@ class PopulationConvNet(torch.nn.Sequential):
                                                            If None, uses a full-rank convolution (standard torch.nn.Conv3D).   
                 layer_spatio_temporal_rank : the rank of the Tucker decomposition of the weights if layer_spatio_temporal_factorization_type is not None                                                                                                 
                 layer_nonlinearity : true/false if a nonlinearity is used after this layer
-                layer_normalization : to include a normalization in the input to this channel. I
-                                      If True, then BatchNorm2D over space.
-                                      If '3D', then BatchNorm3D over space/time.
-                                      If 'instance', then InstanceNorm2D over space.
-                                      If 'instance3D', then InstanceNorm3D over space/time.
+                layer_normalization : to include a normalization in the input to this channel.
+                                      If True, then BatchNorm3D
+                                      If 'instance3D' or 'instance', then InstanceNorm3D 
                 
             hidden_activation : the activation function to be used after each convolution layer (if layer_nonlinearity is True)
             out_bias : if final linear layer has a bias
             out_activation : the activation function following the final output nonlinearity
-            out_normalization : to include a normalization or not before the final output linearity 
+            out_normalization : to include a normalization or not before the final output linearity. Takes the same values as layer_normalization
             normalization_options : keyword arguments to normalization layers. Right now, the same args are passed to all layers.
                                     By default, no momentum or affine weight is used. This choice makes sizing inputs easier. 
             verbose : to print model info during instantiation
@@ -614,10 +568,10 @@ class PopulationConvNet(torch.nn.Sequential):
         
 
         if(out_normalization == True):
-            if(verbose): print(f"Adding final 2D batch normalization layer.")
+            if(verbose): print(f"Adding final 3D batch normalization layer.")
             layers.append(torch.nn.BatchNorm3d(num_features=in_channels, **normalization_options))
         elif(out_normalization == 'instance'):
-            if(verbose): print(f"Adding final 2D instance normalization layer.")
+            if(verbose): print(f"Adding final 3D instance normalization layer.")
             layers.append(torch.nn.InstanceNorm3d(num_features=in_channels, **normalization_options))
         elif(out_normalization == '3D'):
             if(verbose): print(f"Adding final 3D batch normalization layer.")

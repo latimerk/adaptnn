@@ -82,9 +82,15 @@ class LinearNonlinear(SpatioTemporalDatasetBase):
             Y_test  = self.model(X_test.unsqueeze(0))
 
             if(out_noise_std_train is not None and (out_noise_std_train != 0)):
+                self.Y_train_0 = torch.tensor(Y_train)
                 Y_train = Y_train + torch.randn(Y_train.shape, generator=generator, dtype=dtype, device=device)*out_noise_std_train
+            else:
+                self.Y_train_0 = Y_train
             if(out_noise_std_test is not None and (out_noise_std_test != 0)):
+                self.Y_test_0 = torch.tensor(Y_test)
                 Y_test = Y_test + torch.randn(Y_test.shape, generator=generator, dtype=dtype, device=device)*out_noise_std_test
+            else:
+                self.Y_test_0 = Y_test
 
             X_train = X_train[...,(filter_time-1):]
             X_test = X_test[...,(filter_time-1):]

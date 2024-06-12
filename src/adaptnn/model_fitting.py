@@ -96,7 +96,7 @@ class ArtificialModel:
                 outputs=self.model(X_t)
                 
                 #calculate loss
-                loss=criterion(outputs, Y_t)# + penalty(self.model)
+                loss=criterion(outputs, Y_t) + penalty(self.model)
                 
                 #getting gradients wrt parameters
                 loss.backward()

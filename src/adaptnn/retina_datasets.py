@@ -2,7 +2,7 @@ import h5py
 from scipy.io import loadmat
 import numpy as np
 import torch
-
+import warnings
 from adaptnn.utils import  tuple_convert
 
 
@@ -59,14 +59,24 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
 
         if(self.disjoint_segments == 'full'):
             # completely disconnects segments: otherwise time padding period can be the end of another segment
-            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1, self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
         elif(self.disjoint_segments):
-            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1, self.segment_length_bins)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
         else:
-            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1)
             self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
+
+        last_bin = (self.start_idx_X_train.max().cpu().numpy() + self.X_time) 
+        first_bin = self.start_idx_X_train.min().cpu().numpy()
+
+        unused_bins = (self.X_train.shape[-1] - (last_bin+1)) + first_bin
+
+        if(unused_bins > 0):
+            warnings.warn(f"Segmentation of dataset leaves {unused_bins} time bins unseen.")
+        if(last_bin >=  self.X_train.shape[-1] or first_bin < 0):
+            raise RuntimeError("Invalid segmentation of dataset: will return invalid indices.")
 
     def __len__(self) -> int:
         return len(self.start_idx_X_train)
@@ -376,13 +386,13 @@ class MultiContrastFullFieldJN05Dataset(torch.utils.data.Dataset):
 
         if(self.disjoint_segments == 'full'):
             # completely disconnects segments: otherwise time padding period can be the end of another segment
-            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1, self.X_time)
             self.start_idx_Y_train = self.start_idx_X_train 
         elif(self.disjoint_segments):
-            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time, self.segment_length_bins)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1, self.segment_length_bins)
             self.start_idx_Y_train = self.start_idx_X_train 
         else:
-            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time)
+            self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1)
             self.start_idx_Y_train = self.start_idx_X_train
 
         if(self.test_long):
