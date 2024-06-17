@@ -376,10 +376,10 @@ class PopulationConvNet(torch.nn.Sequential):
                        in_channels : int = 1,
                        layer_channels : int | Tuple[int] = (8,8),
                        layer_time_lengths : int | Tuple[int] = (40,12),
-                       layer_spatio_temporal_rank : int | List[int|Tuple] = 2,
+                       layer_spatio_temporal_rank : int | List[int|Tuple] = [6,6],
                        layer_spatio_temporal_factorization_type : str | Tuple[str] = 'spatial',
 
-                       layer_rf_pixel_widths : int | Tuple[int] = (15,15),
+                       layer_rf_pixel_widths : int | Tuple[int] = (15,11),
                        layer_rf_pixel_heights : int | Tuple[int] = None,
                        layer_rf_dilations_x : int | Tuple[int] = 1,
                        layer_rf_dilations_y : int | Tuple[int] = None,

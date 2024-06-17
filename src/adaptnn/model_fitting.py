@@ -114,8 +114,17 @@ class ArtificialModel:
                 print(f"epoch {epoch+1}, loss {running_loss}, step size {optimizer.param_groups[0]['lr']}")
 
 class NiruDataModel:
-    def __init__(self, dataset_params = {"recording" : "A-noise", "dtype" : torch.float32},
-                       net_params = {"out_activation" : torch.nn.Softplus}):
+    def __init__(self, dataset_params = {"recording" : "A-noise", "dtype" : torch.float32, "segment_length_bins" : 300},
+                       net_params = {
+                           "layer_channels" : (8,8),
+                           "layer_rf_pixel_widths" : (15,11),
+                           "layer_time_lengths" : (40,12),
+                           "layer_spatio_temporal_factorization_type" : ("spatial", "spatial"),
+                           "layer_spatio_temporal_rank" : [6,6],
+                           "hidden_activation" : torch.nn.Softplus,
+                           "layer_normalization" : (False,False),
+                           "out_normalization" : True,
+                           "out_activation" : torch.nn.Softplus}):
 
         self.dataset = NiruDataset(**dataset_params)
 
@@ -154,7 +163,8 @@ class NiruDataModel:
               batch_params = {"batch_size":16, "shuffle":True},
               penalty_params = {},
               loss_params = {},
-              print_every=50):
+              print_every=50,
+              print_every_batch=None):
 
         optimizer = torch.optim.Adam(self.model.parameters(), **optimizer_params)
         if(scheduler_params is not None):
@@ -171,7 +181,10 @@ class NiruDataModel:
 
         for epoch in range(epochs):
             running_loss = 0
-            for X_t, Y_t in train_dataloader:
+            for batch_num,batch_data in enumerate(train_dataloader):
+                X_t, Y_t = batch_data
+                if(print_every_batch is not None and (batch_num+1) % print_every_batch == 0):
+                    print(f"\tbatch {batch_num+1}")
         
                 #convert numpy array to torch Variable
                 optimizer.zero_grad()
@@ -194,7 +207,7 @@ class NiruDataModel:
                 
             if(np.isnan(running_loss) or np.isinf(running_loss)):
                 raise RuntimeError(f"Loss function returning invalid results: {running_loss}")
-            if((epoch+1) % print_every == 0):
+            if(print_every is not None and (epoch+1) % print_every == 0):
                 print(f"epoch {epoch+1}, loss {running_loss}, step size {optimizer.param_groups[0]['lr']}")
 
 

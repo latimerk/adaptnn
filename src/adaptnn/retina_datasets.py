@@ -18,7 +18,7 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
                  disjoint_segments : bool
                 ):
         self.time_padding_bins_ = None
-        self.segment_length_bins = segment_length_bins
+        self.segment_length_bins_ = segment_length_bins
 
         self.X_sig, self.X_mu = torch.std_mean(X_train,dim=-1,keepdim=True)
        
@@ -33,19 +33,41 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
         self.Y_test = Y_test
         
 
-        self.disjoint_segments = disjoint_segments
-        self.X_time = time_padding_bins + self.segment_length_bins
-        self.start_idx_X_train = np.array([0])
-        self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins
-
+        self.disjoint_segments_ = disjoint_segments
         self.time_padding_bins = time_padding_bins
-       
+
+        self.reset_start_indices_()
+    @property 
+    def segment_length_bins(self) -> int:
+        if(self.segment_length_bins_ is None):
+            self.segment_length_bins_ = 100
+        return self.segment_length_bins_
+    @segment_length_bins.setter
+    def segment_length_bins(self, segment_length_bins_ : int) -> None:
+        if(self.segment_length_bins_ == segment_length_bins_):
+            return
+        self.segment_length_bins_ = segment_length_bins_
+        self.reset_start_indices_()
+
+    @property
+    def disjoint_segments(self) -> str | bool:
+        return self.disjoint_segments_
+    @disjoint_segments.setter
+    def disjoint_segments(self, disjoint_segments_ : str | bool) -> None:
+        if(self.disjoint_segments_ == disjoint_segments_):
+            return
+        self.disjoint_segments_ = disjoint_segments_
+        self.reset_start_indices_()
+
+
     @property
     def time_padding_bins(self) -> int:
         if(self.time_padding_bins_ is None):
             self.time_padding_bins_ = 0
         return self.time_padding_bins_
     
+
+
     @time_padding_bins.setter
     def time_padding_bins(self, time_padding_bins_ : int) -> None:
         '''
@@ -55,18 +77,20 @@ class SpatioTemporalDatasetBase(torch.utils.data.Dataset):
             return
         
         self.time_padding_bins_ = time_padding_bins_
-        self.X_time = time_padding_bins_ + self.segment_length_bins
+        self.reset_start_indices_()
 
+    def reset_start_indices_(self) -> None:
+        self.X_time = self.time_padding_bins + self.segment_length_bins
         if(self.disjoint_segments == 'full'):
             # completely disconnects segments: otherwise time padding period can be the end of another segment
             self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1, self.X_time)
-            self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
+            self.start_idx_Y_train = self.start_idx_X_train + self.time_padding_bins
         elif(self.disjoint_segments):
             self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1, self.segment_length_bins)
-            self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
+            self.start_idx_Y_train = self.start_idx_X_train + self.time_padding_bins
         else:
             self.start_idx_X_train = torch.arange(0, self.X_train.shape[-1]-self.X_time+1)
-            self.start_idx_Y_train = self.start_idx_X_train + time_padding_bins_
+            self.start_idx_Y_train = self.start_idx_X_train + self.time_padding_bins
 
         last_bin = (self.start_idx_X_train.max().cpu().numpy() + self.X_time) 
         first_bin = self.start_idx_X_train.min().cpu().numpy()
